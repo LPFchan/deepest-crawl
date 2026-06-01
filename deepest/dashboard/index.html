@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>deepest-crawl</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #e6edf3; display: flex; height: 100vh; overflow: hidden; }
+  .sidebar { width: 380px; border-right: 1px solid #30363d; display: flex; flex-direction: column; background: #161b22; }
+  .main { flex: 1; display: flex; flex-direction: column; }
+  .panels { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .panel { padding: 12px; overflow-y: auto; border-bottom: 1px solid #30363d; }
+  .panel:last-child { border-bottom: none; }
+  .panel-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; margin-bottom: 6px; }
+  .browser-frame { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; position: relative; min-height: 200px; flex: 1; display: flex; align-items: center; justify-content: center; }
+  .browser-frame img { width: 100%; display: block; }
+  .browser-frame .placeholder { color: #8b949e; font-size: 14px; padding: 40px; text-align: center; }
+  pre { font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; max-height: 180px; overflow-y: auto; }
+  .status-bar { height: 28px; background: #161b22; border-top: 1px solid #30363d; display: flex; align-items: center; padding: 0 12px; font-size: 12px; gap: 16px; color: #8b949e; }
+  .status-bar .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.active { background: #3fb950; }
+  .dot.idle { background: #8b949e; }
+  .dot.error { background: #f85149; }
+  .chat { display: flex; flex-direction: column; gap: 8px; flex: 1; }
+  .msg { border-radius: 6px; padding: 8px 12px; font-size: 13px; line-height: 1.5; }
+  .msg.user { background: #1f6feb22; border-left: 3px solid #1f6feb; }
+  .msg.assistant { background: #23863622; border-left: 3px solid #238636; }
+  .msg.tool { background: #d2992222; border-left: 3px solid #d29922; font-family: monospace; font-size: 12px; }
+  .msg-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; margin-bottom: 2px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 4px; }
+  .action-tag { background: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-family: monospace; }
+  #dom-panel pre { max-height: 140px; }
+  #prompt-panel { flex: 1; overflow-y: auto; }
+  #prompt-panel .chat { min-height: 0; }
+  #status-text { flex: 1; }
+  .header { padding: 10px 12px; border-bottom: 1px solid #30363d; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .header span { color: #8b949e; font-weight: 400; font-size: 12px; }
+  .conn-status { margin-left: auto; font-size: 11px; color: #8b949e; }
+  .conn-status.ok { color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="sidebar">
+  <div class="header">deepest-crawl <span>live</span></div>
+  <div class="panels">
+    <div class="panel" id="browser-panel" style="flex:1;display:flex;flex-direction:column">
+      <div class="panel-label">browser</div>
+      <div class="browser-frame" id="browser-frame">
+        <div class="placeholder">waiting for crawl...</div>
+      </div>
+      <div style="margin-top:6px;font-size:12px;color:#8b949e" id="url-display"></div>
+    </div>
+    <div class="panel" id="dom-panel">
+      <div class="panel-label">DOM text</div>
+      <pre id="dom-text">-</pre>
+    </div>
+  </div>
+</div>
+<div class="main">
+  <div class="panels">
+    <div class="panel" id="prompt-panel">
+      <div class="panel-label">model conversation</div>
+      <div class="chat" id="chat-log"></div>
+    </div>
+    <div class="panel" id="actions-panel" style="max-height:100px">
+      <div class="panel-label">actions</div>
+      <div class="actions" id="actions-list"><span style="color:#8b949e;font-size:12px">-</span></div>
+    </div>
+  </div>
+  <div class="status-bar">
+    <span class="dot idle" id="status-dot"></span>
+    <span id="status-text">idle</span>
+    <span id="progress-text">0 / 0</span>
+    <span class="conn-status" id="conn-status">disconnected</span>
+  </div>
+</div>
+
+<script>
+const SCREENSHOT_URL = "/screenshot";
+const STATE_URL = "/state";
+const EVENTS_URL = "/events";
+
+const esc = (s) => (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+function setStatus(status, detail) {
+  const dot = document.getElementById("status-dot");
+  const text = document.getElementById("status-text");
+  dot.className = "dot " + status;
+  text.textContent = detail || status;
+}
+
+function setProgress(done, total) {
+  document.getElementById("progress-text").textContent = (done || 0) + " / " + (total || 0);
+}
+
+function showScreenshot() {
+  const frame = document.getElementById("browser-frame");
+  const img = frame.querySelector("img");
+  if (img) {
+    img.src = SCREENSHOT_URL + "?" + Date.now();
+  } else {
+    frame.innerHTML = `<img src="${SCREENSHOT_URL}?${Date.now()}" alt="screenshot">`;
+  }
+}
+
+function setUrl(url) {
+  document.getElementById("url-display").textContent = url || "";
+}
+
+function setDomText(text) {
+  document.getElementById("dom-text").textContent = text || "-";
+}
+
+function addMessage(role, content) {
+  const log = document.getElementById("chat-log");
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.innerHTML = `<div class="msg-label">${role}</div><div>${esc(content)}</div>`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function clearChat() {
+  document.getElementById("chat-log").innerHTML = "";
+}
+
+function setActions(actions) {
+  const list = document.getElementById("actions-list");
+  if (!actions || actions.length === 0) {
+    list.innerHTML = '<span style="color:#8b949e;font-size:12px">-</span>';
+    return;
+  }
+  list.innerHTML = actions.slice(-20).map(a =>
+    `<span class="action-tag">${esc(JSON.stringify(a))}</span>`
+  ).join("");
+}
+
+function updateState(data) {
+  if (data.ping) return;
+
+  setStatus(data.status === "done" ? "idle" : data.error ? "error" : "active", data.status || "idle");
+  setProgress(data.progress?.done, data.progress?.total);
+  setUrl(data.url);
+
+  if (data.dom_text) setDomText(data.dom_text);
+  else if (data.mode === "vision") setDomText("[vision fallback — no DOM text]");
+  else setDomText("-");
+
+  if (data.has_screenshot && data.status !== "done") showScreenshot();
+  setActions(data.actions);
+
+  if (data.response) {
+    const last = document.getElementById("chat-log").lastElementChild;
+    if (last && last.classList.contains("assistant")) {
+      last.querySelector("div:last-child").textContent = data.response;
+    } else {
+      addMessage("assistant", data.response);
+    }
+  }
+}
+
+// Connect SSE
+function connectSSE() {
+  const es = new EventSource(EVENTS_URL);
+  const conn = document.getElementById("conn-status");
+  conn.textContent = "connected";
+  conn.className = "conn-status ok";
+
+  es.onmessage = (e) => {
+    try {
+      updateState(JSON.parse(e.data));
+    } catch (err) {
+      console.error("SSE parse error", err);
+    }
+  };
+
+  es.onerror = () => {
+    conn.textContent = "reconnecting...";
+    conn.className = "conn-status";
+    es.close();
+    setTimeout(connectSSE, 2000);
+  };
+}
+
+connectSSE();
+
+// Poll screenshot periodically even without SSE
+setInterval(() => {
+  const step = document.getElementById("status-dot");
+  if (step.classList.contains("active")) {
+    showScreenshot();
+  }
+}, 3000);
+</script>
+</body>
+</html>
