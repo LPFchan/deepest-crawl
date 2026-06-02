@@ -11,10 +11,12 @@ self-amending forge when DOM is thin.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 MIN_TEXT_CHARS = 200
+VISION_MAX_DIM = int(os.environ.get("DEEPEST_VISION_MAX_DIM", "640"))
 
 
 @dataclass
@@ -68,7 +70,7 @@ def _dom_or_vision(engine, tab, fail_note: str = "") -> Perception:
 
     # thin/empty DOM -> vision fallback (BH's capture_screenshot)
     try:
-        path = h.capture_screenshot(max_dim=1800)
+        path = h.capture_screenshot(max_dim=VISION_MAX_DIM)
         png = open(path, "rb").read()
         return Perception(mode="vision", image_png=png,
                           note=(fail_note or "thin_dom") + ";vision")

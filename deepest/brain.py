@@ -31,7 +31,19 @@ def _post(payload: dict, timeout: float) -> str:
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         body = json.loads(r.read())
-    return body["choices"][0]["message"]["content"].strip()
+    msg = body["choices"][0]["message"]
+    content = msg.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+
+    # Some Qwen-style thinking servers return reasoning before final content.
+    # Prefer final content, but keep smoke runs from crashing if only reasoning
+    # is present because generation stopped early.
+    reasoning = msg.get("reasoning") or msg.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning.strip()
+
+    raise KeyError("content")
 
 
 def summarize_text(url: str, text: str, max_chars: int = 12000,
