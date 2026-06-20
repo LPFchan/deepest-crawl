@@ -2,14 +2,14 @@
 
 ## Snapshot
 
-- Last updated: 2026-06-21 05-55-00 KST
+- Last updated: 2026-06-21 06-04-00 KST
 - Overall posture: `active`
 - Current focus: Stabilize the dashboard crawler and keep public-facing setup
   documentation portable.
-- Highest-priority blocker: Public repository setup still needs a GitHub remote
-  and push.
-- Next operator decision needed: None; the operator requested public GitHub
-  publication.
+- Highest-priority blocker: Clean-checkout smoke validation has not been run
+  after public publication.
+- Next operator decision needed: Share the public repository URL with
+  collaborators and decide the next hardening target.
 - Related decisions: none yet
 
 ## Current State Summary
@@ -24,9 +24,9 @@ domain memory/playbooks, article extraction, Wayback fallback for true
 content-down pages, same-brain summary verification, security-verification
 handling, and post-job tab cleanup.
 
-The dashboard implementation is committed locally. The remaining publication
-work is to sanitize public-facing text, commit that cleanup, create or attach a
-GitHub remote, and push the repository publicly.
+The repository is published publicly at
+`https://github.com/LPFchan/deepest-crawl`. The local `main` branch tracks
+`origin/main`.
 
 ## Active Phases Or Tracks
 
@@ -69,25 +69,23 @@ GitHub remote, and push the repository publicly.
 
 - Goal: Commit and publish the current local implementation to GitHub using the
   repo-template provenance rules.
-- Status: `in progress`
+- Status: `complete`
 - Why this matters now: The operator noticed the changes have not been uploaded
   yet.
-- Current work: Implementation commits exist; public-facing docs and records are
-  being generalized before the first GitHub push.
-- Exit criteria: Sanitization commit lands, an `origin` remote exists, the repo
-  is pushed, and GitHub visibility is public.
-- Dependencies: Authenticated GitHub CLI or equivalent GitHub publishing path.
-- Risks: Public docs must not expose private machine paths, credentials,
-  personal operator identity, or local-only setup claims.
+- Current work: Public repository exists and `main` has been pushed.
+- Exit criteria: Met; GitHub visibility is public.
+- Dependencies: none.
+- Risks: Public collaborators still need clean-install and smoke-test guidance
+  validated on a fresh checkout.
 - Related ids: none
 
 ## Active Blockers And Risks
 
-- Blocker or risk: Repository is not pushed to GitHub yet.
-  - Effect: Work cannot be shared with external collaborators through GitHub.
+- Blocker or risk: Clean-checkout smoke validation is still pending.
+  - Effect: External collaborators may hit undocumented local setup assumptions.
   - Owner: operator/orchestrator
-  - Mitigation: Commit sanitization, create or attach a public GitHub remote,
-    and push `main`.
+  - Mitigation: Run a fresh clone/install/dashboard smoke path and update docs
+    with any missing prerequisites.
   - Related ids: none
 - Blocker or risk: Real-profile crawling touches target sites with the
   operator's Chrome profile, cookies, extensions, and network identity.
@@ -113,13 +111,9 @@ GitHub remote, and push the repository publicly.
 
 ## Immediate Next Steps
 
-- Next: Finish public-facing sanitization and commit it.
-  - Owner: operator
-  - Trigger: Before first public push.
-  - Related ids: none
-- Next: Create or attach the GitHub remote and push `main` publicly.
+- Next: Run a clean-checkout install and dashboard smoke path.
   - Owner: orchestrator/operator
-  - Trigger: After sanitization commit.
+  - Trigger: Before calling collaborator setup stable.
   - Related ids: none
 - Next: Run a representative dashboard-selected batch after the latest
   verification-click and tab-cleanup changes.

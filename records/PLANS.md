@@ -4,18 +4,15 @@ This document contains accepted future direction only.
 
 ## Approved Directions
 
-### Publish Current Dashboard Crawler Work
+### Clean-Checkout Collaborator Smoke
 
-- Outcome: The current local WebUI, service manager, agentic crawl, extraction,
-  verifier, verification-handling, and bulk-selection work is available in a
-  public GitHub repository with sanitized public-facing documentation.
-- Why this is accepted: The operator explicitly noticed that the work has not
-  been uploaded yet, and the current implementation is too substantial to remain
-  local-only.
-- Expected value: Preserves the work, enables review, and creates a stable base
-  for continued dashboard/crawler hardening.
-- Preconditions: Sanitization commit, authenticated GitHub publishing path.
-- Earliest likely start: in progress.
+- Outcome: A fresh clone can install dependencies, start the dashboard, and reach
+  local service readiness or a clear documented prerequisite failure.
+- Why this is accepted: The repository is now public, and collaborators need a
+  validated setup path rather than only the original development checkout.
+- Expected value: Makes the public repo easier to use and review.
+- Preconditions: Public GitHub repo exists.
+- Earliest likely start: immediately.
 - Related ids: none
 
 ### Dashboard-Driven Crawl Hardening
@@ -73,14 +70,10 @@ This document contains accepted future direction only.
 
 ### Near Term
 
-- Initiative: Sanitize public-facing docs and records.
-  - Why now: The repo is about to become public and should not expose
-    private-machine assumptions as project requirements.
-  - Dependencies: none
-  - Related ids: none
-- Initiative: Create or attach GitHub remote and push publicly.
-  - Why now: The implementation is ready to share with collaborators.
-  - Dependencies: Sanitization commit and authenticated GitHub CLI.
+- Initiative: Run clean-checkout collaborator smoke.
+  - Why now: Public publication is complete, but fresh-clone setup still needs
+    validation.
+  - Dependencies: Public repo and local test directory.
   - Related ids: none
 - Initiative: Run a representative selected dashboard batch.
   - Why now: The latest changes affect captcha clicks, sidebar refresh, and tab
