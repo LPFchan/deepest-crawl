@@ -7,15 +7,15 @@ This document contains accepted future direction only.
 ### Publish Current Dashboard Crawler Work
 
 - Outcome: The current local WebUI, service manager, agentic crawl, extraction,
-  verifier, verification-handling, and bulk-selection work is reviewed, committed
-  with compliant provenance, pushed, and made available on GitHub.
+  verifier, verification-handling, and bulk-selection work is available in a
+  public GitHub repository with sanitized public-facing documentation.
 - Why this is accepted: The operator explicitly noticed that the work has not
   been uploaded yet, and the current implementation is too substantial to remain
-  only in a dirty worktree.
+  local-only.
 - Expected value: Preserves the work, enables review, and creates a stable base
   for continued dashboard/crawler hardening.
-- Preconditions: Diff review and operator choice on one PR versus split PRs.
-- Earliest likely start: immediately.
+- Preconditions: Sanitization commit, authenticated GitHub publishing path.
+- Earliest likely start: in progress.
 - Related ids: none
 
 ### Dashboard-Driven Crawl Hardening
@@ -25,8 +25,8 @@ This document contains accepted future direction only.
   clean tab lifecycle, and accurate sidebar status updates.
 - Why this is accepted: The operator is actively using selected/bulk dashboard
   crawls and has found practical workflow bugs during real runs.
-- Expected value: Makes the tool usable for long Eastself-derived crawl batches
-  without constant manual recovery.
+- Expected value: Makes the tool usable for long selected crawl batches without
+  constant manual recovery.
 - Preconditions: Live Chrome transport and MLX brain.
 - Earliest likely start: now, continuing from current implementation.
 - Related ids: none
@@ -35,13 +35,11 @@ This document contains accepted future direction only.
 
 - Outcome: A clean environment rebuild can install all declared dependencies and
   run the dashboard without targeted manual package installs.
-- Why this is accepted: `uv sync` is currently blocked by a declared
-  `browser-harness>=0.1.0` constraint while only `browser-harness==0.0.1` is
-  available in the current package source.
+- Why this is accepted: Public collaborators need a reproducible setup path, and
+  dependency metadata has changed during publication cleanup.
 - Expected value: Reduces setup drift and makes GitHub/CI/local rebuilds
   reproducible.
-- Preconditions: Decide whether to pin the available browser-harness version,
-  change package source, or remove the declared dependency if unused.
+- Preconditions: Sanitization commit and first public push.
 - Earliest likely start: before or during publication cleanup.
 - Related ids: none
 
@@ -75,13 +73,14 @@ This document contains accepted future direction only.
 
 ### Near Term
 
-- Initiative: Review dirty worktree and choose publication scope.
-  - Why now: The implementation is broad and currently local-only.
-  - Dependencies: Operator preference on single versus split PR.
+- Initiative: Sanitize public-facing docs and records.
+  - Why now: The repo is about to become public and should not expose
+    private-machine assumptions as project requirements.
+  - Dependencies: none
   - Related ids: none
-- Initiative: Generate compliant commit message skeletons and publish to GitHub.
-  - Why now: Repo-template provenance rules require registered `LOG-*` commits.
-  - Dependencies: Diff scope selected.
+- Initiative: Create or attach GitHub remote and push publicly.
+  - Why now: The implementation is ready to share with collaborators.
+  - Dependencies: Sanitization commit and authenticated GitHub CLI.
   - Related ids: none
 - Initiative: Run a representative selected dashboard batch.
   - Why now: The latest changes affect captcha clicks, sidebar refresh, and tab

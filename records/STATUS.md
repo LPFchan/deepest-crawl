@@ -2,22 +2,20 @@
 
 ## Snapshot
 
-- Last updated: 2026-06-21 05-39-42 KST
+- Last updated: 2026-06-21 05-55-00 KST
 - Overall posture: `active`
-- Current focus: Stabilize the dashboard crawler and prepare the uncommitted
-  WebUI/agent changes for GitHub publication.
-- Highest-priority blocker: The current implementation work is still local and
-  uncommitted; commit provenance and push/PR work remain.
-- Next operator decision needed: Confirm whether to publish the current local
-  changes as one PR or split them into smaller commits/PRs.
+- Current focus: Stabilize the dashboard crawler and keep public-facing setup
+  documentation portable.
+- Highest-priority blocker: Public repository setup still needs a GitHub remote
+  and push.
+- Next operator decision needed: None; the operator requested public GitHub
+  publication.
 - Related decisions: none yet
 
 ## Current State Summary
 
-The dashboard now runs as the primary operator surface on `0.0.0.0:8766`. The
-service layer can launch or reuse the local MLX brain and the Open Browser Use
-Chrome transport, and the current operator session has both Chrome and the
-Holo/MLX brain reporting ready.
+The dashboard runs as the primary operator surface. The service layer can launch
+or reuse a local MLX brain and the Open Browser Use Chrome transport.
 
 The crawler has moved beyond dashboard scaffolding. It supports a filtered URL
 queue, status filters, multi-select `Crawl Selected`, cancelation, crawl
@@ -26,9 +24,9 @@ domain memory/playbooks, article extraction, Wayback fallback for true
 content-down pages, same-brain summary verification, security-verification
 handling, and post-job tab cleanup.
 
-The working tree is dirty with broad dashboard, service, Chrome, perception,
-runner, dependency, and script changes. These changes have not been committed or
-pushed.
+The dashboard implementation is committed locally. The remaining publication
+work is to sanitize public-facing text, commit that cleanup, create or attach a
+GitHub remote, and push the repository publicly.
 
 ## Active Phases Or Tracks
 
@@ -38,7 +36,7 @@ pushed.
   deep crawls.
 - Status: `in progress`
 - Why this matters now: The operator is actively using dashboard-driven crawls
-  against Eastself-derived URLs.
+  against large selected URL batches.
 - Current work: Service startup, queue filtering, multi-select bulk crawl,
   summary verification, security-verification handling, sidebar refresh
   behavior, and tab cleanup have been implemented locally.
@@ -63,35 +61,33 @@ pushed.
   `chrome=True`, and failures surface actionable log tails.
 - Dependencies: Installed MLX model paths, Open Browser Use extension, local
   Chrome profile.
-- Risks: Project-wide `uv sync` is currently blocked by a `browser-harness`
-  version mismatch, so new extraction dependencies were installed into `.venv`
-  with targeted `uv pip install`.
+- Risks: Clean-environment rebuild still needs a fresh smoke run after the
+  public dependency cleanup.
 - Related ids: none
 
 ### Repo Publication
 
 - Goal: Commit and publish the current local implementation to GitHub using the
   repo-template provenance rules.
-- Status: `not started`
+- Status: `in progress`
 - Why this matters now: The operator noticed the changes have not been uploaded
   yet.
-- Current work: None; no commit has been created.
-- Exit criteria: Local diff is reviewed, scoped into one or more compliant
-  commit-message skeletons, committed, pushed, and opened as a PR or published
-  to the intended branch.
-- Dependencies: Operator choice on commit/PR granularity.
-- Risks: The worktree includes many modified and untracked files; unrelated or
-  partially experimental changes must not be accidentally bundled without
-  review.
+- Current work: Implementation commits exist; public-facing docs and records are
+  being generalized before the first GitHub push.
+- Exit criteria: Sanitization commit lands, an `origin` remote exists, the repo
+  is pushed, and GitHub visibility is public.
+- Dependencies: Authenticated GitHub CLI or equivalent GitHub publishing path.
+- Risks: Public docs must not expose private machine paths, credentials,
+  personal operator identity, or local-only setup claims.
 - Related ids: none
 
 ## Active Blockers And Risks
 
-- Blocker or risk: Current implementation is not committed or pushed.
-  - Effect: Work can be lost locally and cannot be reviewed through GitHub.
+- Blocker or risk: Repository is not pushed to GitHub yet.
+  - Effect: Work cannot be shared with external collaborators through GitHub.
   - Owner: operator/orchestrator
-  - Mitigation: Inspect the diff, choose scope, generate compliant commit
-    skeletons, commit, push, and open a PR.
+  - Mitigation: Commit sanitization, create or attach a public GitHub remote,
+    and push `main`.
   - Related ids: none
 - Blocker or risk: Real-profile crawling touches target sites with the
   operator's Chrome profile, cookies, extensions, and network identity.
@@ -108,23 +104,22 @@ pushed.
     visual checkbox fallback, and mark persistent verification as failed instead
     of looping forever.
   - Related ids: none
-- Blocker or risk: Project dependency sync is inconsistent.
-  - Effect: `uv sync` may fail until the `browser-harness` requirement is
-    reconciled with available package versions.
+- Blocker or risk: Project dependency sync needs revalidation.
+  - Effect: A fresh checkout may still expose packaging or platform assumptions
+    even after the public dependency cleanup.
   - Owner: orchestrator
-  - Mitigation: Resolve the dependency constraint before relying on clean
-    environment rebuilds.
+  - Mitigation: Run a clean install/smoke path after the first public push.
   - Related ids: none
 
 ## Immediate Next Steps
 
-- Next: Review and scope the current local diff.
-  - Owner: orchestrator
-  - Trigger: Before any commit or PR.
-  - Related ids: none
-- Next: Decide commit/PR granularity for publishing to GitHub.
+- Next: Finish public-facing sanitization and commit it.
   - Owner: operator
-  - Trigger: After reviewing the diff scope.
+  - Trigger: Before first public push.
+  - Related ids: none
+- Next: Create or attach the GitHub remote and push `main` publicly.
+  - Owner: orchestrator/operator
+  - Trigger: After sanitization commit.
   - Related ids: none
 - Next: Run a representative dashboard-selected batch after the latest
   verification-click and tab-cleanup changes.

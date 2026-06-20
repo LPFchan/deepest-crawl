@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Extract stuck links from Eastself's cache.db -> deepest-crawl input JSON.
+"""Extract stuck links from a compatible SQLite link_cache -> input JSON.
 
-Source: ~/Documents/Eastself/data/cache.db  table `link_cache`
+Default source: DEEPEST_LINK_CACHE_DB or a local development cache path.
 Filter: triage_status IN (unretrievable, needs_deep_crawl)
 Output: inputs/links.json  [{id, url, reason, sub_reason, has_image, prior_len}]
 """
-import argparse, hashlib, json, re, sqlite3
+import argparse, hashlib, json, os, re, sqlite3
 from pathlib import Path
 
 
@@ -16,8 +16,14 @@ def sanitize_url(url: str) -> str:
     u = u.rstrip(".,;:!? ")
     return u
 
-DB = Path.home() / "Documents/Eastself/data/cache.db"
-OUT = Path(__file__).resolve().parent / "inputs" / "links.json"
+DB = Path(os.environ.get(
+    "DEEPEST_LINK_CACHE_DB",
+    str(Path.home() / "Documents/Eastself/data/cache.db"),
+))
+OUT = Path(os.environ.get(
+    "DEEPEST_LINKS_OUT",
+    str(Path(__file__).resolve().parent / "inputs" / "links.json"),
+))
 STATUSES = ("unretrievable", "needs_deep_crawl")
 
 
@@ -28,11 +34,11 @@ def export_links(db: str | Path = DB, out: str | Path = OUT,
     out = Path(out).expanduser()
     statuses = tuple(statuses or STATUSES)
     if not db.exists():
-        raise FileNotFoundError(f"Eastself cache DB not found: {db}")
+        raise FileNotFoundError(f"SQLite link cache DB not found: {db}")
     if not statuses:
         raise ValueError("At least one triage status is required.")
 
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)  # read-only; won't disturb Eastself
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     q = ("SELECT url, triage_status, triage_source, image_url, "
          "       length(coalesce(content,'')) AS prior_len "

@@ -249,8 +249,9 @@ Adopted repos keep the baseline and extend it for their tooling, build artifacts
 
 ## Local Divergence
 
-- Codex CLI shell commands in this repo should be prefixed with `rtk`, following
-  the operator's local `/Users/yeowool/.codex/RTK.md` instruction.
+- Operators may keep private shell wrappers or machine-specific agent
+  instructions outside this repository. Public repo policy must not depend on
+  those local files.
 - The root `skills/` directory has two intentional roles in this project:
   repo-template procedural workflows under named skill directories, and
   deepest-crawl generated per-site extractors under `skills/<host>/extract.py`.

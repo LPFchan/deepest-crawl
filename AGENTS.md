@@ -2,6 +2,10 @@
 
 `AGENTS.md` is the canonical editable agent-instructions file. It enforces repo behavior while deferring canonical policy to `records/REPO.md`.
 
+Local operators may keep private machine-specific instructions outside this
+repository. Do not commit local shell wrappers, credentials, tokens, or personal
+paths into this file.
+
 ## Read First
 
 - `records/REPO.md`

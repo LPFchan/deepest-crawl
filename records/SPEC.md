@@ -2,28 +2,30 @@
 
 - Project: deepest-crawl
 - Project id: deepest-crawl
-- Operator: yeowool
-- Last updated: 2026-06-21 05-39-42 KST
+- Operator: local user
+- Last updated: 2026-06-21 05-55-00 KST
 - Related decisions: none yet
 
 ## Project Thesis
 
-deepest-crawl is a real-browser deep-crawl sidecar for Eastself. It takes links
-that Eastself marked `unretrievable` or `needs_deep_crawl`, opens them through
-the operator's real Chrome profile, extracts page content from DOM text or a
-screenshot, and summarizes the result with a local multimodal MLX-VLM server.
+deepest-crawl is a local real-browser deep-crawl dashboard. It takes URLs from a
+JSON queue, opens them through the operator's real Chrome profile, extracts page
+content from DOM text, article text, or a screenshot, and summarizes the result
+with a local OpenAI-compatible model server.
 It also exposes an operator dashboard for inspecting, filtering, selecting, and
 running crawls with live browser screenshots and agent trace.
 
 ## Core Capabilities
 
-- Extract stuck links from Eastself's SQLite `link_cache` into
-  `inputs/links.json`.
+- Load crawl queues from `inputs/links.json`.
+- Optionally extract stuck links from a compatible SQLite `link_cache` source
+  into `inputs/links.json`.
 - Drive the operator's real Chrome via Open Browser Use extension transport.
 - Perceive page content through per-site extractors, generic DOM text, or
   screenshot fallback.
-- Summarize DOM text or screenshots through a local OpenAI-compatible
-  `mlx_vlm.server` on `127.0.0.1:8765`.
+- Summarize DOM text or screenshots through a local OpenAI-compatible model
+  endpoint; the bundled service helper defaults to MLX-VLM on
+  `127.0.0.1:8765`.
 - Launch and monitor local Chrome transport plus the MLX brain from the
   dashboard service layer.
 - Run agentic crawls that can navigate redirects, wait through transient
@@ -46,9 +48,8 @@ running crawls with live browser screenshots and agent trace.
 
 - The primary browser engine is the operator's real Chrome profile, not a
   separate headless browser.
-- The dashboard must bind to an externally reachable host when requested
-  (`0.0.0.0:8766` in the operator workflow) and remain able to launch/reuse
-  Chrome plus the local MLX brain.
+- The dashboard must bind to an externally reachable host when requested and
+  remain able to launch/reuse Chrome plus the local brain service.
 - The crawler must treat generated `inputs/` and `outputs/` data as local
   runtime artifacts, not source truth.
 - Generated per-site extractor code is inspectable local code and is validated
@@ -60,9 +61,40 @@ running crawls with live browser screenshots and agent trace.
 - Crawler-owned tabs should be closed after each job succeeds, fails, or is
   canceled.
 
+## Architecture
+
+The system separates browser connection from crawl intelligence.
+
+- Browser connection: `deepest/engines/chrome.py` drives an already-running
+  Chrome profile through the Open Browser Use extension transport.
+- Browser mechanics: `deepest/bh/helpers.py` vendors browser-helper mechanics
+  and runs them through `deepest/bh/_ipc.py`, a transport shim over the Open
+  Browser Use CDP bridge.
+- Perception: `deepest/perception/policy.py` prefers per-site extractors and
+  rendered text, then escalates to screenshot vision when page state requires it.
+- Brain: `deepest/brain.py` talks to a local OpenAI-compatible endpoint. The
+  bundled service helper can start `mlx_vlm.server`, but any compatible endpoint
+  can be configured with `DEEPEST_BRAIN_ENDPOINT`.
+- Dashboard: `deepest/dashboard/` owns the operator workflow: queue filtering,
+  selected/bulk crawl jobs, live browser preview, agent/tool timeline, service
+  controls, and domain memory.
+
+Per-link flow:
+
+1. Open a crawler-owned tab and navigate to the target URL.
+2. Handle redirects, short-link landing pages, transient security verification,
+   and login/autofill requests when policy chooses them.
+3. Extract rendered page content through DOM text, article extraction, and
+   viewport context.
+4. Use screenshot vision for visually blocked or verification-like states.
+5. Use the Internet Archive only when the page is content-down, removed,
+   unavailable, or similarly unrecoverable.
+6. Generate a faithful summary and verify it with a second same-brain pass.
+7. Persist the result and close the crawler-owned tab.
+
 ## Main Surfaces
 
-- `extract_links.py`: Eastself cache export.
+- `extract_links.py`: optional SQLite `link_cache` export.
 - `deepest/runner.py`: crawl loop and output writer.
 - `deepest/engines/chrome.py`: real Chrome transport.
 - `deepest/perception/policy.py`: DOM-first, screenshot-fallback perception.
