@@ -4,57 +4,102 @@ This document contains accepted future direction only.
 
 ## Approved Directions
 
+### Publish Current Dashboard Crawler Work
+
+- Outcome: The current local WebUI, service manager, agentic crawl, extraction,
+  verifier, verification-handling, and bulk-selection work is reviewed, committed
+  with compliant provenance, pushed, and made available on GitHub.
+- Why this is accepted: The operator explicitly noticed that the work has not
+  been uploaded yet, and the current implementation is too substantial to remain
+  only in a dirty worktree.
+- Expected value: Preserves the work, enables review, and creates a stable base
+  for continued dashboard/crawler hardening.
+- Preconditions: Diff review and operator choice on one PR versus split PRs.
+- Earliest likely start: immediately.
+- Related ids: none
+
+### Dashboard-Driven Crawl Hardening
+
+- Outcome: Dashboard-selected crawl batches can run with stable UI state,
+  controlled pacing, visible browser state, non-looping verification behavior,
+  clean tab lifecycle, and accurate sidebar status updates.
+- Why this is accepted: The operator is actively using selected/bulk dashboard
+  crawls and has found practical workflow bugs during real runs.
+- Expected value: Makes the tool usable for long Eastself-derived crawl batches
+  without constant manual recovery.
+- Preconditions: Live Chrome transport and MLX brain.
+- Earliest likely start: now, continuing from current implementation.
+- Related ids: none
+
+### Dependency And Rebuild Hygiene
+
+- Outcome: A clean environment rebuild can install all declared dependencies and
+  run the dashboard without targeted manual package installs.
+- Why this is accepted: `uv sync` is currently blocked by a declared
+  `browser-harness>=0.1.0` constraint while only `browser-harness==0.0.1` is
+  available in the current package source.
+- Expected value: Reduces setup drift and makes GitHub/CI/local rebuilds
+  reproducible.
+- Preconditions: Decide whether to pin the available browser-harness version,
+  change package source, or remove the declared dependency if unused.
+- Earliest likely start: before or during publication cleanup.
+- Related ids: none
+
 ### Reliable Smoke Path
 
 - Outcome: A one-command smoke path verifies imports, local services, Chrome
-  transport, and one representative crawl.
-- Why this is accepted: Current smoke readiness is blocked by live services, and
-  the first input URL is not guaranteed to be a useful representative page.
-- Expected value: Faster confidence before running large crawl batches.
-- Preconditions: Brain server and OBU transport are available.
-- Earliest likely start: immediately after repo-template adoption.
+  transport, dashboard service readiness, and one representative crawl.
+- Why this is accepted: Dashboard functionality is now broad enough that
+  targeted smoke coverage is needed before large batches or PR review.
+- Expected value: Faster confidence before running real-profile crawl batches.
+- Preconditions: Dependency sync issue resolved or documented; representative
+  test URL selected.
+- Earliest likely start: after initial publication scope is chosen.
 - Related ids: none
 
-### Dashboard Integration
+### Security-Verification Handling
 
-- Outcome: The normal runner can optionally publish live state to the dashboard
-  without a separate disconnected process.
-- Why this is accepted: Dashboard scaffolding exists, but the standard runner
-  does not call the instrumentation patch.
-- Expected value: Makes crawl behavior inspectable during long runs.
-- Preconditions: Smoke path works.
-- Earliest likely start: after the reliable smoke path.
-- Related ids: none
-
-### Link-Set Safety Review
-
-- Outcome: The large Eastself-derived link set is filtered or sampled before
-  real-profile crawling.
-- Why this is accepted: The current input contains thousands of arbitrary links,
-  and this crawler intentionally uses the operator's real Chrome profile.
-- Expected value: Reduces exposure and improves crawl signal.
-- Preconditions: Operator confirms acceptable crawl policy.
-- Earliest likely start: before any large batch crawl.
+- Outcome: Verification pages are handled by wait/visible interaction/screenshot
+  vision where possible, never by reload loops, and persistent verification
+  produces a clear per-URL failure instead of blocking a batch.
+- Why this is accepted: Real target sites frequently present Cloudflare or
+  similar checks, and the operator wants the agent to solve visible controls
+  when possible.
+- Expected value: Fewer stuck crawls and less accidental Wayback use for pages
+  that are temporarily challenge-gated rather than content-down.
+- Preconditions: Real Chrome profile and screenshot capture available.
+- Earliest likely start: now, with continued tuning from observed failures.
 - Related ids: none
 
 ## Sequencing
 
 ### Near Term
 
-- Initiative: Finish repo-template adoption and initial commit.
-  - Why now: Future work needs local provenance and commit enforcement.
-  - Dependencies: none
+- Initiative: Review dirty worktree and choose publication scope.
+  - Why now: The implementation is broad and currently local-only.
+  - Dependencies: Operator preference on single versus split PR.
   - Related ids: none
-- Initiative: Run live smoke tests.
-  - Why now: End-to-end functionality is currently unproven.
-  - Dependencies: Brain server and OBU Chrome transport.
+- Initiative: Generate compliant commit message skeletons and publish to GitHub.
+  - Why now: Repo-template provenance rules require registered `LOG-*` commits.
+  - Dependencies: Diff scope selected.
+  - Related ids: none
+- Initiative: Run a representative selected dashboard batch.
+  - Why now: The latest changes affect captcha clicks, sidebar refresh, and tab
+    cleanup.
+  - Dependencies: Chrome and Holo/MLX brain ready.
   - Related ids: none
 
 ### Mid Term
 
-- Initiative: Wire dashboard instrumentation into the runner CLI.
-  - Why later: It is useful only after the base crawl path is verified.
-  - Dependencies: Reliable smoke path.
+- Initiative: Resolve dependency sync mismatch.
+  - Why later: It is a publication/rebuild hygiene issue, not a blocker for the
+    currently running local dashboard.
+  - Dependencies: Package availability and dependency audit.
+  - Related ids: none
+- Initiative: Add focused smoke checks for dashboard services, queue operations,
+  and representative agentic crawls.
+  - Why later: Tests should follow after publication scope is stabilized.
+  - Dependencies: Reliable representative URLs.
   - Related ids: none
 
 ### Deferred But Accepted
