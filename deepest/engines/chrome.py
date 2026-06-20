@@ -30,9 +30,12 @@ def discover_socket() -> str:
     """Read OBU's active-socket registry (written by the native host when Chrome
     + extension are live)."""
     if not ACTIVE_REGISTRY.exists():
+        from .. import services
+        services.ensure_chrome_transport()
+    if not ACTIVE_REGISTRY.exists():
         raise RuntimeError(
             "Real-Chrome transport not reachable: no OBU socket registry. "
-            "Open your real Chrome with the Open Browser Use extension enabled, "
+            "Chrome autostart was attempted. Open your real Chrome with the Open Browser Use extension enabled, "
             "then verify with `open-browser-use info`."
         )
     return json.loads(ACTIVE_REGISTRY.read_text())["socketPath"]
@@ -105,6 +108,9 @@ class RealChromeEngine(BrowserEngine):
 
     def user_tabs(self) -> list[dict]:
         return self._c().get_user_tabs()
+
+    def session_tabs(self) -> list[dict]:
+        return self._c().get_tabs()
 
     def close_tab(self, tab: TabHandle) -> None:
         try:

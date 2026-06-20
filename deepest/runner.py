@@ -16,7 +16,7 @@ import json
 import time
 from pathlib import Path
 
-from . import brain, signals
+from . import brain, services, signals
 from .engines.chrome import RealChromeEngine
 from .perception.policy import perceive
 from .skills_store import forge as forge_mod
@@ -79,8 +79,13 @@ def main():
                     help="enable self-amending: brain writes per-site skills on thin pages")
     a = ap.parse_args()
 
-    if not brain.alive():
-        raise SystemExit("brain not reachable on :8765 — start ./serve-brain.sh first")
+    try:
+        services.ensure_brain(status=lambda msg: print(f"[service] {msg}", flush=True))
+        services.ensure_chrome_transport(
+            status=lambda msg: print(f"[service] {msg}", flush=True)
+        )
+    except Exception as e:
+        raise SystemExit(f"local service startup failed: {type(e).__name__}: {e}") from e
 
     links = json.loads(Path(a.inp).read_text())
     if a.limit:
@@ -106,6 +111,7 @@ def main():
             out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2))
     finally:
         engine.close()
+        services.shutdown_autostarted()
 
 
 if __name__ == "__main__":

@@ -1,17 +1,25 @@
-"""The brain — froggeric/Qwen3.6-27B vision-intact, via the local MLX-VLM server.
+"""The brain — MLX-VLM server via OpenAI-compatible endpoint.
 
-Talks to the OpenAI-compatible endpoint that `serve-brain.sh` exposes on
-127.0.0.1:8765. Two entry points: summarize text (DOM path) and summarize an
-image (vision-fallback path). Same model handles both.
+Override via env vars:
+  DEEPEST_BRAIN_ENDPOINT  (default: http://127.0.0.1:8765/v1/chat/completions)
+  DEEPEST_BRAIN_MODEL     (default: froggeric/Qwen3.6-27B-...)
+  DEEPEST_BRAIN_VISION    (default: '1' — set to '0' for text-only models)
 """
 from __future__ import annotations
 
 import base64
 import json
+import os
+from urllib.parse import urlparse, urlunparse
 import urllib.request
 
-ENDPOINT = "http://127.0.0.1:8765/v1/chat/completions"
-MODEL = "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit"
+ENDPOINT = os.environ.get(
+    "DEEPEST_BRAIN_ENDPOINT",
+    "http://127.0.0.1:8765/v1/chat/completions",
+)
+MODEL = os.environ.get("DEEPEST_BRAIN_MODEL",
+    "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit")
+HAS_VISION = os.environ.get("DEEPEST_BRAIN_VISION", "1") == "1"
 
 SYSTEM = (
     "You are the summarization brain of a deep web crawler. You receive the "
@@ -22,9 +30,35 @@ SYSTEM = (
 )
 
 
+def configure(model: str | None = None, endpoint: str | None = None,
+              vision: bool | None = None) -> None:
+    global MODEL, ENDPOINT, HAS_VISION
+    if model:
+        MODEL = model
+        os.environ["DEEPEST_BRAIN_MODEL"] = model
+    if endpoint:
+        ENDPOINT = endpoint
+        os.environ["DEEPEST_BRAIN_ENDPOINT"] = endpoint
+    if vision is not None:
+        HAS_VISION = bool(vision)
+        os.environ["DEEPEST_BRAIN_VISION"] = "1" if HAS_VISION else "0"
+
+
+def current_model() -> str:
+    return MODEL
+
+
+def current_endpoint() -> str:
+    return ENDPOINT
+
+
+def has_vision() -> bool:
+    return HAS_VISION
+
+
 def _post(payload: dict, timeout: float) -> str:
     req = urllib.request.Request(
-        ENDPOINT,
+        current_endpoint(),
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -46,23 +80,56 @@ def _post(payload: dict, timeout: float) -> str:
     raise KeyError("content")
 
 
+def complete(system: str, user: str, max_tokens: int = 512,
+             temperature: float = 0.2, timeout: float = 180.0) -> str:
+    return _post({
+        "model": current_model(),
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }, timeout)
+
+
+def complete_with_image(system: str, user: str, png_bytes: bytes,
+                        max_tokens: int = 512, temperature: float = 0.2,
+                        timeout: float = 240.0) -> str:
+    if not has_vision():
+        raise RuntimeError(
+            f"complete_with_image called but DEEPEST_BRAIN_VISION=0 "
+            f"(model has no vision tower).")
+    b64 = base64.b64encode(png_bytes).decode()
+    data_uri = f"data:image/png;base64,{b64}"
+    return _post({
+        "model": current_model(),
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": [
+                {"type": "text", "text": user},
+                {"type": "image_url", "image_url": {"url": data_uri}},
+            ]},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }, timeout)
+
+
 def summarize_text(url: str, text: str, max_chars: int = 12000,
                    max_tokens: int = 512, timeout: float = 180.0) -> str:
     text = (text or "").strip()[:max_chars]
     user = f"URL: {url}\n\n--- PAGE TEXT ---\n{text}"
-    return _post({
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user},
-        ],
-        "max_tokens": max_tokens,
-        "temperature": 0.2,
-    }, timeout)
+    return complete(SYSTEM, user, max_tokens=max_tokens, temperature=0.2,
+                    timeout=timeout)
 
 
 def summarize_image(url: str, png_bytes: bytes,
                     max_tokens: int = 512, timeout: float = 240.0) -> str:
+    if not has_vision():
+        raise RuntimeError(
+            f"summarize_image called but DEEPEST_BRAIN_VISION=0 (model "
+            f"has no vision tower). URL: {url}")
     b64 = base64.b64encode(png_bytes).decode()
     data_uri = f"data:image/png;base64,{b64}"
     user = [
@@ -71,7 +138,7 @@ def summarize_image(url: str, png_bytes: bytes,
         {"type": "image_url", "image_url": {"url": data_uri}},
     ]
     return _post({
-        "model": MODEL,
+        "model": current_model(),
         "messages": [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": user},
@@ -101,7 +168,7 @@ def generate_extractor(url: str, host: str, html_excerpt: str, reference: str = 
     user = (f"host: {host}\nurl: {url}{ref_block}\n\n--- HTML EXCERPT ---\n"
             f"{html_excerpt[:16000]}")
     return _post({
-        "model": MODEL,
+        "model": current_model(),
         "messages": [
             {"role": "system", "content": EXTRACTOR_SYSTEM},
             {"role": "user", "content": user},
@@ -111,9 +178,20 @@ def generate_extractor(url: str, host: str, html_excerpt: str, reference: str = 
     }, timeout)
 
 
+def models_endpoint() -> str:
+    parsed = urlparse(current_endpoint())
+    path = parsed.path
+    marker = "/v1/chat/completions"
+    if path.endswith(marker):
+        path = path[: -len(marker)] + "/v1/models"
+    else:
+        path = "/v1/models"
+    return urlunparse(parsed._replace(path=path, query="", fragment=""))
+
+
 def alive(timeout: float = 3.0) -> bool:
     try:
-        urllib.request.urlopen("http://127.0.0.1:8765/v1/models", timeout=timeout).close()
+        urllib.request.urlopen(models_endpoint(), timeout=timeout).close()
         return True
     except OSError:
         return False
