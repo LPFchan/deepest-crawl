@@ -1,197 +1,133 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>deepest-crawl</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #e6edf3; display: flex; height: 100vh; overflow: hidden; }
-  .sidebar { width: 380px; border-right: 1px solid #30363d; display: flex; flex-direction: column; background: #161b22; }
-  .main { flex: 1; display: flex; flex-direction: column; }
-  .panels { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  .panel { padding: 12px; overflow-y: auto; border-bottom: 1px solid #30363d; }
-  .panel:last-child { border-bottom: none; }
-  .panel-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; margin-bottom: 6px; }
-  .browser-frame { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; position: relative; min-height: 200px; flex: 1; display: flex; align-items: center; justify-content: center; }
-  .browser-frame img { width: 100%; display: block; }
-  .browser-frame .placeholder { color: #8b949e; font-size: 14px; padding: 40px; text-align: center; }
-  pre { font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; max-height: 180px; overflow-y: auto; }
-  .status-bar { height: 28px; background: #161b22; border-top: 1px solid #30363d; display: flex; align-items: center; padding: 0 12px; font-size: 12px; gap: 16px; color: #8b949e; }
-  .status-bar .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-  .dot.active { background: #3fb950; }
-  .dot.idle { background: #8b949e; }
-  .dot.error { background: #f85149; }
-  .chat { display: flex; flex-direction: column; gap: 8px; flex: 1; }
-  .msg { border-radius: 6px; padding: 8px 12px; font-size: 13px; line-height: 1.5; }
-  .msg.user { background: #1f6feb22; border-left: 3px solid #1f6feb; }
-  .msg.assistant { background: #23863622; border-left: 3px solid #238636; }
-  .msg.tool { background: #d2992222; border-left: 3px solid #d29922; font-family: monospace; font-size: 12px; }
-  .msg-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #8b949e; margin-bottom: 2px; }
-  .actions { display: flex; flex-wrap: wrap; gap: 4px; }
-  .action-tag { background: #21262d; border: 1px solid #30363d; border-radius: 4px; padding: 2px 6px; font-size: 11px; font-family: monospace; }
-  #dom-panel pre { max-height: 140px; }
-  #prompt-panel { flex: 1; overflow-y: auto; }
-  #prompt-panel .chat { min-height: 0; }
-  #status-text { flex: 1; }
-  .header { padding: 10px 12px; border-bottom: 1px solid #30363d; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
-  .header span { color: #8b949e; font-weight: 400; font-size: 12px; }
-  .conn-status { margin-left: auto; font-size: 11px; color: #8b949e; }
-  .conn-status.ok { color: #3fb950; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>deepest-crawl</title>
+  <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<div class="sidebar">
-  <div class="header">deepest-crawl <span>live</span></div>
-  <div class="panels">
-    <div class="panel" id="browser-panel" style="flex:1;display:flex;flex-direction:column">
-      <div class="panel-label">browser</div>
-      <div class="browser-frame" id="browser-frame">
-        <div class="placeholder">waiting for crawl...</div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">DC</div>
+        <div>
+          <h1>deepest-crawl</h1>
+          <div class="status-line">
+            <span class="dot idle" id="status-dot"></span>
+            <span id="status-text">idle</span>
+            <span id="progress-text">0 / 0</span>
+            <span id="conn-status">disconnected</span>
+          </div>
+        </div>
       </div>
-      <div style="margin-top:6px;font-size:12px;color:#8b949e" id="url-display"></div>
-    </div>
-    <div class="panel" id="dom-panel">
-      <div class="panel-label">DOM text</div>
-      <pre id="dom-text">-</pre>
-    </div>
+      <form class="url-form" id="crawl-form">
+        <input type="url" id="url-input" placeholder="https://example.com">
+        <button type="submit" id="crawl-btn">Crawl</button>
+      </form>
+      <div class="service-strip">
+        <select id="brain-model-select" aria-label="Brain model">
+          <option value="">Brain model</option>
+        </select>
+        <span class="service-chip" id="brain-chip">Brain: checking</span>
+        <span class="service-chip" id="chrome-chip">Chrome: checking</span>
+        <button class="secondary" id="start-services-btn" type="button">Start Services</button>
+        <div class="service-detail" id="service-detail"></div>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="queue-pane">
+        <div class="pane-head">
+          <div>
+            <h2>Uncrawlable URLs</h2>
+            <p id="queue-summary">loading</p>
+          </div>
+          <button class="secondary" id="refresh-links-btn" type="button">Refresh DB</button>
+        </div>
+        <div class="toolbar">
+          <input type="search" id="link-search" placeholder="Filter URLs">
+          <select id="reason-filter" aria-label="Reason">
+            <option value="">All reasons</option>
+            <option value="unretrievable">unretrievable</option>
+            <option value="needs_deep_crawl">needs_deep_crawl</option>
+          </select>
+          <select id="status-filter" aria-label="Status">
+            <option value="">All statuses</option>
+            <option value="pending">pending</option>
+            <option value="failed">failed</option>
+            <option value="success">success</option>
+          </select>
+        </div>
+        <div class="queue-actions idle" id="queue-actions">
+          <button id="crawl-all-btn" class="accent" type="button">Crawl All</button>
+          <button id="stop-job-btn" class="danger secondary" type="button" hidden>Stop</button>
+        </div>
+        <div class="link-list" id="link-list"></div>
+      </section>
+
+      <div class="pane-resizer" data-resizer="queue-browser" role="separator" aria-orientation="vertical"></div>
+
+      <section class="browser-pane">
+        <div class="pane-head">
+          <div>
+            <h2>Browser</h2>
+            <p id="url-display">waiting</p>
+          </div>
+          <span class="pill" id="mode-display">none</span>
+        </div>
+        <div class="browser-frame" id="browser-frame">
+          <div class="placeholder">No active crawl</div>
+        </div>
+        <div class="split">
+          <section>
+            <h3>DOM Text</h3>
+            <pre id="dom-text">-</pre>
+          </section>
+          <section>
+            <h3>Error</h3>
+            <pre id="error-text">-</pre>
+          </section>
+        </div>
+      </section>
+
+      <div class="pane-resizer" data-resizer="browser-agent" role="separator" aria-orientation="vertical"></div>
+
+      <section class="activity-pane">
+        <div class="pane-head compact agent-head">
+          <h2>Agent</h2>
+          <button class="secondary" id="clear-chat-btn" type="button">Clear</button>
+        </div>
+        <div class="chat-log" id="chat-log">
+          <div class="msg memory" id="knowledge-card">
+            <div class="msg-label">Domain Memory</div>
+            <div class="knowledge-list" id="knowledge-list"></div>
+            <div class="playbook-list" id="playbook-list"></div>
+          </div>
+          <div class="timeline-list" id="timeline-list"></div>
+        </div>
+
+        <details class="memory-editor">
+          <summary>Domain memory</summary>
+          <form class="note-form" id="domain-note-form">
+            <textarea id="domain-note-input" placeholder="Domain note"></textarea>
+            <button type="submit">Save</button>
+          </form>
+          <form class="playbook-form" id="domain-playbook-form">
+            <input type="text" id="domain-playbook-title" placeholder="Playbook title">
+            <textarea id="domain-playbook-steps" placeholder="One step per line"></textarea>
+            <button type="submit">Save</button>
+          </form>
+        </details>
+
+        <form class="prompt-form" id="prompt-form">
+          <input type="text" id="prompt-input" placeholder="Tell the agent what to do">
+          <button type="submit" id="prompt-btn">Send</button>
+        </form>
+      </section>
+    </main>
   </div>
-</div>
-<div class="main">
-  <div class="panels">
-    <div class="panel" id="prompt-panel">
-      <div class="panel-label">model conversation</div>
-      <div class="chat" id="chat-log"></div>
-    </div>
-    <div class="panel" id="actions-panel" style="max-height:100px">
-      <div class="panel-label">actions</div>
-      <div class="actions" id="actions-list"><span style="color:#8b949e;font-size:12px">-</span></div>
-    </div>
-  </div>
-  <div class="status-bar">
-    <span class="dot idle" id="status-dot"></span>
-    <span id="status-text">idle</span>
-    <span id="progress-text">0 / 0</span>
-    <span class="conn-status" id="conn-status">disconnected</span>
-  </div>
-</div>
 
-<script>
-const SCREENSHOT_URL = "/screenshot";
-const STATE_URL = "/state";
-const EVENTS_URL = "/events";
-
-const esc = (s) => (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-
-function setStatus(status, detail) {
-  const dot = document.getElementById("status-dot");
-  const text = document.getElementById("status-text");
-  dot.className = "dot " + status;
-  text.textContent = detail || status;
-}
-
-function setProgress(done, total) {
-  document.getElementById("progress-text").textContent = (done || 0) + " / " + (total || 0);
-}
-
-function showScreenshot() {
-  const frame = document.getElementById("browser-frame");
-  const img = frame.querySelector("img");
-  if (img) {
-    img.src = SCREENSHOT_URL + "?" + Date.now();
-  } else {
-    frame.innerHTML = `<img src="${SCREENSHOT_URL}?${Date.now()}" alt="screenshot">`;
-  }
-}
-
-function setUrl(url) {
-  document.getElementById("url-display").textContent = url || "";
-}
-
-function setDomText(text) {
-  document.getElementById("dom-text").textContent = text || "-";
-}
-
-function addMessage(role, content) {
-  const log = document.getElementById("chat-log");
-  const div = document.createElement("div");
-  div.className = "msg " + role;
-  div.innerHTML = `<div class="msg-label">${role}</div><div>${esc(content)}</div>`;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-}
-
-function clearChat() {
-  document.getElementById("chat-log").innerHTML = "";
-}
-
-function setActions(actions) {
-  const list = document.getElementById("actions-list");
-  if (!actions || actions.length === 0) {
-    list.innerHTML = '<span style="color:#8b949e;font-size:12px">-</span>';
-    return;
-  }
-  list.innerHTML = actions.slice(-20).map(a =>
-    `<span class="action-tag">${esc(JSON.stringify(a))}</span>`
-  ).join("");
-}
-
-function updateState(data) {
-  if (data.ping) return;
-
-  setStatus(data.status === "done" ? "idle" : data.error ? "error" : "active", data.status || "idle");
-  setProgress(data.progress?.done, data.progress?.total);
-  setUrl(data.url);
-
-  if (data.dom_text) setDomText(data.dom_text);
-  else if (data.mode === "vision") setDomText("[vision fallback — no DOM text]");
-  else setDomText("-");
-
-  if (data.has_screenshot && data.status !== "done") showScreenshot();
-  setActions(data.actions);
-
-  if (data.response) {
-    const last = document.getElementById("chat-log").lastElementChild;
-    if (last && last.classList.contains("assistant")) {
-      last.querySelector("div:last-child").textContent = data.response;
-    } else {
-      addMessage("assistant", data.response);
-    }
-  }
-}
-
-// Connect SSE
-function connectSSE() {
-  const es = new EventSource(EVENTS_URL);
-  const conn = document.getElementById("conn-status");
-  conn.textContent = "connected";
-  conn.className = "conn-status ok";
-
-  es.onmessage = (e) => {
-    try {
-      updateState(JSON.parse(e.data));
-    } catch (err) {
-      console.error("SSE parse error", err);
-    }
-  };
-
-  es.onerror = () => {
-    conn.textContent = "reconnecting...";
-    conn.className = "conn-status";
-    es.close();
-    setTimeout(connectSSE, 2000);
-  };
-}
-
-connectSSE();
-
-// Poll screenshot periodically even without SSE
-setInterval(() => {
-  const step = document.getElementById("status-dot");
-  if (step.classList.contains("active")) {
-    showScreenshot();
-  }
-}, 3000);
-</script>
+  <script src="/app.js"></script>
 </body>
 </html>

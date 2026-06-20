@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import Callable
 
 
 @dataclass
 class CrawlStep:
     id: str = ""
+    link_id: str = ""
     url: str = ""
+    host: str = ""
     mode: str = ""
     png_bytes: bytes | None = None
     dom_text: str = ""
@@ -18,8 +21,12 @@ class CrawlStep:
     prompt: str = ""
     response: str = ""
     actions: list[dict] = field(default_factory=list)
+    trace: list[dict] = field(default_factory=list)
+    domain_knowledge: list[dict] = field(default_factory=list)
+    domain_playbooks: list[dict] = field(default_factory=list)
     status: str = "pending"
     error: str = ""
+    error_detail: str = ""
     note: str = ""
 
 
@@ -47,6 +54,21 @@ class DashboardState:
             self._current.actions.append(action)
             self._notify(self._current)
 
+    def push_trace(self, event: dict) -> None:
+        with self._lock:
+            self._current.trace.append(event)
+            self._notify(self._current)
+
+    def clear_activity(self) -> None:
+        with self._lock:
+            self._current.actions = []
+            self._current.trace = []
+            self._current.prompt = ""
+            self._current.response = ""
+            self._current.error = ""
+            self._current.error_detail = ""
+            self._notify(self._current)
+
     def update(self, **kwargs) -> None:
         with self._lock:
             for k, v in kwargs.items():
@@ -67,7 +89,7 @@ class DashboardState:
     def _notify(self, step: CrawlStep) -> None:
         for cb in self._listeners:
             try:
-                cb(step)
+                cb(deepcopy(step))
             except Exception:
                 pass
 

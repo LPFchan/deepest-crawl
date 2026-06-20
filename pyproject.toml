@@ -4,12 +4,15 @@ version = "0.1.0"
 description = "Deep web crawler using real Chrome + vision-capable LLM"
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.12",
     "mlx-vlm>=0.5.0",
     "mlx-lm>=0.31.0",
+    "lxml>=5",
     "open-browser-use-sdk>=0.1.40",
     "browser-harness>=0.1.0",
     "Pillow>=12",
     "huggingface-hub>=1.17",
+    "trafilatura>=2",
 ]
 
 [tool.uv]

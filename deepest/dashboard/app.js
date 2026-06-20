@@ -1,0 +1,1072 @@
+const SCREENSHOT_URL = "/screenshot";
+const EVENTS_URL = "/events";
+const LINKS_URL = "/links";
+const SERVICES_URL = "/services";
+
+const state = {
+  visibleLinks: [],
+  currentUrl: "",
+  currentHost: "",
+  currentId: "",
+  lastPrompt: "",
+  lastError: "",
+  loadingLinks: false,
+  queueTotal: 0,
+  queueFiltered: 0,
+  queuePageSize: 50,
+  queueMaxVisible: 250,
+  queueOffset: 0,
+  queuePaging: false,
+  chromeReady: false,
+  screenshotBusy: false,
+  screenshotObjectUrl: "",
+  chatEntries: [],
+  traceEntries: [],
+  timelineSeq: 0,
+  lastResponse: "",
+  brainModels: [],
+  activeBrainModelId: "",
+  selectedIds: new Set(),
+  selectionAnchorId: "",
+  dragSelection: null,
+  suppressNextLinkClick: false,
+};
+
+const $ = (id) => document.getElementById(id);
+const PANE_WIDTHS_KEY = "deepest:pane-widths:v1";
+
+function esc(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function setBusy(button, busy, text) {
+  if (!button) return;
+  button.disabled = busy;
+  if (text) button.textContent = text;
+}
+
+function setJobActive(active) {
+  $("stop-job-btn").hidden = !active;
+  $("queue-actions").classList.toggle("idle", !active);
+}
+
+function applyPaneWidths(widths) {
+  const root = document.documentElement;
+  root.style.setProperty("--queue-pane-width", `${widths.queue}fr`);
+  root.style.setProperty("--browser-pane-width", `${widths.browser}fr`);
+  root.style.setProperty("--agent-pane-width", `${widths.agent}fr`);
+}
+
+function loadPaneWidths() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PANE_WIDTHS_KEY) || "{}");
+    let widths = {
+      queue: Number(saved.queue) || 28,
+      browser: Number(saved.browser) || 42,
+      agent: Number(saved.agent) || 30,
+    };
+    const sum = widths.queue + widths.browser + widths.agent;
+    if (sum < 10 || sum > 1000) widths = { queue: 28, browser: 42, agent: 30 };
+    applyPaneWidths(widths);
+  } catch {
+    applyPaneWidths({ queue: 28, browser: 42, agent: 30 });
+  }
+}
+
+function savePaneWidths(widths) {
+  localStorage.setItem(PANE_WIDTHS_KEY, JSON.stringify(widths));
+}
+
+function currentPaneWidths() {
+  const style = getComputedStyle(document.documentElement);
+  const parse = (name, fallback) => parseFloat(style.getPropertyValue(name)) || fallback;
+  return {
+    queue: parse("--queue-pane-width", 28),
+    browser: parse("--browser-pane-width", 42),
+    agent: parse("--agent-pane-width", 30),
+  };
+}
+
+function bindPaneResizers() {
+  const workspace = document.querySelector(".workspace");
+  if (!workspace) return;
+  document.querySelectorAll(".pane-resizer").forEach((resizer) => {
+    resizer.addEventListener("pointerdown", (event) => {
+      if (window.matchMedia("(max-width: 1220px)").matches) return;
+      event.preventDefault();
+      resizer.setPointerCapture(event.pointerId);
+      resizer.classList.add("dragging");
+      const startX = event.clientX;
+      const start = currentPaneWidths();
+      const totalWidth = workspace.getBoundingClientRect().width;
+      const totalUnits = start.queue + start.browser + start.agent;
+      const min = { queue: 18, browser: 28, agent: 18 };
+
+      const onMove = (moveEvent) => {
+        const delta = ((moveEvent.clientX - startX) / totalWidth) * totalUnits;
+        let next = { ...start };
+        if (resizer.dataset.resizer === "queue-browser") {
+          next.queue = Math.max(min.queue, start.queue + delta);
+          next.browser = Math.max(min.browser, start.browser - (next.queue - start.queue));
+        } else {
+          next.browser = Math.max(min.browser, start.browser + delta);
+          next.agent = Math.max(min.agent, start.agent - (next.browser - start.browser));
+        }
+        applyPaneWidths(next);
+        savePaneWidths(next);
+      };
+
+      const onUp = () => {
+        resizer.classList.remove("dragging");
+        resizer.removeEventListener("pointermove", onMove);
+        resizer.removeEventListener("pointerup", onUp);
+        resizer.removeEventListener("pointercancel", onUp);
+      };
+
+      resizer.addEventListener("pointermove", onMove);
+      resizer.addEventListener("pointerup", onUp);
+      resizer.addEventListener("pointercancel", onUp);
+    });
+  });
+}
+
+function setStatus(status, detail) {
+  const dot = $("status-dot");
+  const activeStates = ["starting_brain", "brain_ready", "starting_chrome", "active", "waiting", "canceling", "services_starting", "services_ready", "services_busy"];
+  dot.className = "dot " + (activeStates.includes(status) ? "active" : status);
+  $("status-text").textContent = detail || status || "idle";
+}
+
+function setProgress(progress) {
+  $("progress-text").textContent = `${progress?.done || 0} / ${progress?.total || 0}`;
+}
+
+function setMode(mode) {
+  $("mode-display").textContent = mode || "none";
+}
+
+function setUrl(url, note) {
+  $("url-display").textContent = note || url || "waiting";
+}
+
+async function showScreenshot() {
+  if (state.screenshotBusy) return;
+  state.screenshotBusy = true;
+  const frame = $("browser-frame");
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 2500);
+  try {
+    const res = await fetch(`${SCREENSHOT_URL}?${Date.now()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (res.status === 204) {
+      if (!frame.querySelector("img")) {
+        frame.innerHTML = `<div class="placeholder">Chrome ready, waiting for screenshot</div>`;
+      }
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const img = frame.querySelector("img");
+    if (img) {
+      img.src = objectUrl;
+    } else {
+      frame.innerHTML = `<img src="${objectUrl}" alt="browser screenshot">`;
+    }
+    if (state.screenshotObjectUrl) URL.revokeObjectURL(state.screenshotObjectUrl);
+    state.screenshotObjectUrl = objectUrl;
+  } catch (err) {
+    if (!frame.querySelector("img")) {
+      frame.innerHTML = `<div class="placeholder">${esc(String(err))}</div>`;
+    }
+  } finally {
+    window.clearTimeout(timeoutId);
+    state.screenshotBusy = false;
+  }
+}
+
+function addMessage(role, content) {
+  state.chatEntries.push({
+    kind: "message",
+    role,
+    content: String(content || ""),
+    ts: Date.now(),
+    seq: ++state.timelineSeq,
+  });
+  renderTimeline();
+}
+
+function clearChat() {
+  state.chatEntries = [];
+  state.lastPrompt = "";
+  state.lastError = "";
+  state.lastResponse = "";
+  renderTimeline();
+}
+
+async function clearActivity() {
+  state.chatEntries = [];
+  state.traceEntries = [];
+  renderTimeline();
+  try {
+    const res = await fetch("/activity/clear", { method: "POST" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    addMessage("tool", `Clear failed: ${String(err)}`);
+  }
+}
+
+function traceTimestamp(event, index) {
+  const parsed = Date.parse(event?.ts || "");
+  if (Number.isFinite(parsed)) return parsed;
+  return index;
+}
+
+function renderTimeline() {
+  const list = $("timeline-list");
+  if (!list) return;
+  const entries = [...state.traceEntries, ...state.chatEntries]
+    .sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
+  if (!entries.length) {
+    renderEmpty(list, "No agent activity");
+    return;
+  }
+  list.innerHTML = entries.map((entry) => {
+    if (entry.kind === "trace") {
+      return `
+        <div class="msg trace">
+          <div class="msg-label">trace</div>
+          <div>${esc(entry.content)}</div>
+          ${entry.meta ? `<div class="trace-meta">${esc(entry.meta)}</div>` : ""}
+        </div>`;
+    }
+    return `
+      <div class="msg ${esc(entry.role)} chat-message">
+        <div class="msg-label">${esc(entry.role)}</div>
+        <div>${esc(entry.content)}</div>
+      </div>`;
+  }).join("");
+  $("chat-log").scrollTop = $("chat-log").scrollHeight;
+}
+
+function renderEmpty(target, text) {
+  target.innerHTML = `<div class="empty">${esc(text)}</div>`;
+}
+
+function selectedCount() {
+  return state.selectedIds.size;
+}
+
+function updateCrawlActionLabel() {
+  const btn = $("crawl-all-btn");
+  if (!btn) return;
+  if (btn.disabled) return;
+  if (selectedCount()) {
+    btn.textContent = "Crawl Selected";
+    btn.title = `${selectedCount()} selected`;
+  } else {
+    btn.textContent = "Crawl All";
+    btn.title = "";
+  }
+}
+
+function clearSelection() {
+  state.selectedIds.clear();
+  state.selectionAnchorId = "";
+  updateCrawlActionLabel();
+}
+
+function visibleLinkIndex(id) {
+  return state.visibleLinks.findIndex((link) => link.id === id);
+}
+
+function selectVisibleRange(fromId, toId, additive = false) {
+  const from = visibleLinkIndex(fromId);
+  const to = visibleLinkIndex(toId);
+  if (from < 0 || to < 0) return;
+  if (!additive) state.selectedIds.clear();
+  const start = Math.min(from, to);
+  const end = Math.max(from, to);
+  for (let i = start; i <= end; i += 1) {
+    state.selectedIds.add(state.visibleLinks[i].id);
+  }
+  updateCrawlActionLabel();
+}
+
+function toggleSelected(id) {
+  if (state.selectedIds.has(id)) state.selectedIds.delete(id);
+  else state.selectedIds.add(id);
+  state.selectionAnchorId = id;
+  updateCrawlActionLabel();
+}
+
+function renderLinks() {
+  const list = $("link-list");
+  if (state.loadingLinks) {
+    renderEmpty(list, "Loading");
+    updateCrawlActionLabel();
+    return;
+  }
+  if (!state.visibleLinks.length) {
+    renderEmpty(list, "No URLs");
+    updateCrawlActionLabel();
+    return;
+  }
+
+  const rows = state.visibleLinks.map((row) => {
+    const status = row.status || "pending";
+    const cls = status === "success" || status === "ok" ? "ok" : status === "failed" ? "failed" : "";
+    const label = status === "ok" ? "success" : status;
+    const active = row.id === state.currentId ? " active" : "";
+    const selected = state.selectedIds.has(row.id) ? " selected" : "";
+    const meta = [
+      row.reason || "unknown",
+      row.host || "",
+      row.mode || "",
+      row.domain_notes ? `${row.domain_notes} notes` : "",
+    ].filter(Boolean).join(" / ");
+    return `
+      <div class="link-row${active}${selected}" data-link-id="${esc(row.id)}">
+        <div>
+          <div class="link-url" title="${esc(row.url)}">${esc(row.url)}</div>
+          <div class="link-meta">
+            <span class="pill ${cls}">${esc(label)}</span>
+            <span>${esc(meta)}</span>
+          </div>
+          ${row.error ? `<div class="link-error" title="${esc(row.error)}">${esc(row.error)}</div>` : ""}
+        </div>
+        <button type="button" data-fetch-id="${esc(row.id)}">Fetch</button>
+      </div>`;
+  }).join("");
+  const start = state.queueOffset + 1;
+  const end = state.queueOffset + state.visibleLinks.length;
+  const prev = state.queueOffset > 0 ? "Scroll up for previous 50. " : "";
+  const next = end < state.queueFiltered ? "Scroll down for next 50." : "";
+  const footerText = state.queuePaging
+    ? "Loading"
+    : `Showing ${start}-${end} of ${state.queueFiltered}. ${prev}${next}`.trim();
+  list.innerHTML = rows + `<div class="list-footer">${esc(footerText)}</div>`;
+  updateCrawlActionLabel();
+}
+
+function renderDetail(detail) {
+  const link = detail.link || {};
+  const result = detail.result || {};
+  const url = result.url || link.url || "";
+  const host = detail.host || "";
+
+  state.currentUrl = url || state.currentUrl;
+  state.currentHost = host || state.currentHost;
+  state.currentId = result.id || link.id || state.currentId;
+
+  setUrl(url, result.note || "");
+  setMode(result.mode || "saved");
+  $("dom-text").textContent = result.summary || link.url || "-";
+  $("error-text").textContent = result.error_detail || result.error || "-";
+  renderTrace(result.trace || []);
+  renderKnowledge((detail.domain_knowledge || {}).notes || result.domain_knowledge || []);
+  renderPlaybooks((detail.domain_knowledge || {}).playbooks || result.domain_playbooks || []);
+
+  clearChat();
+  addMessage("tool", `Selected ${url || state.currentId}`);
+  if (result.summary) addMessage("assistant", result.summary);
+  if (result.error) addMessage("tool", result.error);
+  renderLinks();
+}
+
+async function selectLink(id) {
+  if (!id) return;
+  state.currentId = id;
+  state.selectionAnchorId = id;
+  renderLinks();
+  try {
+    const res = await fetch(`/results/${encodeURIComponent(id)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    renderDetail(data);
+  } catch (err) {
+    addMessage("tool", String(err));
+  }
+}
+
+function currentQueueParams(limit, offset) {
+  const q = $("link-search").value.trim();
+  const reason = $("reason-filter").value;
+  const status = $("status-filter").value;
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (q) params.set("q", q);
+  if (reason) params.set("reason", reason);
+  if (status) params.set("status", status);
+  return params;
+}
+
+function updateQueueSummary() {
+  const start = state.visibleLinks.length ? state.queueOffset + 1 : 0;
+  const end = state.queueOffset + state.visibleLinks.length;
+  $("queue-summary").textContent = `${start}-${end} visible of ${state.queueFiltered} filtered / ${state.queueTotal} total`;
+}
+
+async function loadLinks(offset = 0, options = {}) {
+  const nextOffset = Math.max(0, offset);
+  const preserveScroll = Boolean(options.preserveScroll);
+  const mode = options.mode || "replace";
+  const list = $("link-list");
+  const previousScrollTop = preserveScroll ? list.scrollTop : 0;
+  const previousScrollHeight = list.scrollHeight;
+  const isInitial = !state.visibleLinks.length || nextOffset === 0;
+  const replacing = mode === "replace";
+  if (!preserveScroll && replacing) {
+    if (isInitial) state.loadingLinks = true;
+    else state.queuePaging = true;
+    renderLinks();
+  } else {
+    state.queuePaging = true;
+  }
+  const fetchLimit = options.limit || (
+    preserveScroll && replacing && state.visibleLinks.length
+      ? state.visibleLinks.length
+      : state.queuePageSize
+  );
+  const params = currentQueueParams(fetchLimit, nextOffset);
+
+  try {
+    const res = await fetch(`${LINKS_URL}?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    const rows = data.rows || [];
+    if (mode === "append") {
+      const existing = new Set(state.visibleLinks.map((row) => row.id));
+      state.visibleLinks = state.visibleLinks.concat(rows.filter((row) => !existing.has(row.id)));
+      if (state.visibleLinks.length > state.queueMaxVisible) {
+        const removeCount = state.visibleLinks.length - state.queueMaxVisible;
+        state.visibleLinks = state.visibleLinks.slice(removeCount);
+        state.queueOffset += removeCount;
+      }
+    } else if (mode === "prepend") {
+      const existing = new Set(state.visibleLinks.map((row) => row.id));
+      const freshRows = rows.filter((row) => !existing.has(row.id));
+      state.visibleLinks = freshRows.concat(state.visibleLinks);
+      state.queueOffset = data.offset || nextOffset;
+      if (state.visibleLinks.length > state.queueMaxVisible) {
+        state.visibleLinks = state.visibleLinks.slice(0, state.queueMaxVisible);
+      }
+    } else {
+      state.visibleLinks = rows;
+      state.queueOffset = data.offset || nextOffset;
+    }
+    state.queueTotal = data.total || 0;
+    state.queueFiltered = data.filtered || 0;
+    updateQueueSummary();
+  } catch (err) {
+    if (replacing) state.visibleLinks = [];
+    $("queue-summary").textContent = String(err);
+  } finally {
+    state.loadingLinks = false;
+    state.queuePaging = false;
+    renderLinks();
+    if (mode === "append") {
+      list.scrollTop = previousScrollTop;
+    } else if (mode === "prepend") {
+      list.scrollTop = previousScrollTop + Math.max(0, list.scrollHeight - previousScrollHeight);
+    } else if (preserveScroll) {
+      list.scrollTop = Math.min(previousScrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
+    } else {
+      list.scrollTop = 0;
+    }
+  }
+}
+
+function handleLinkRowClick(event, id) {
+  if (!id) return;
+  if (state.suppressNextLinkClick) {
+    state.suppressNextLinkClick = false;
+    return;
+  }
+  if (event.shiftKey) {
+    const anchor = state.selectionAnchorId || state.currentId || id;
+    selectVisibleRange(anchor, id, event.metaKey || event.ctrlKey);
+    state.selectionAnchorId = id;
+    renderLinks();
+    return;
+  }
+  if (event.metaKey || event.ctrlKey) {
+    toggleSelected(id);
+    renderLinks();
+    return;
+  }
+  if (selectedCount()) {
+    clearSelection();
+  }
+  state.selectionAnchorId = id;
+  selectLink(id);
+}
+
+function beginLinkDragSelection(event) {
+  if (event.button !== 0) return;
+  if (event.target.closest("button")) return;
+  const row = event.target.closest("[data-link-id]");
+  if (!row) return;
+  state.dragSelection = {
+    anchorId: row.dataset.linkId,
+    additive: event.metaKey || event.ctrlKey,
+    started: false,
+  };
+}
+
+function extendLinkDragSelection(event) {
+  if (!state.dragSelection) return;
+  const row = event.target.closest("[data-link-id]");
+  if (!row) return;
+  const id = row.dataset.linkId;
+  if (!id) return;
+  if (id === state.dragSelection.anchorId && !state.dragSelection.started) return;
+  state.dragSelection.started = true;
+  state.suppressNextLinkClick = true;
+  state.selectionAnchorId = state.dragSelection.anchorId;
+  selectVisibleRange(state.dragSelection.anchorId, id, state.dragSelection.additive);
+  renderLinks();
+}
+
+function endLinkDragSelection() {
+  state.dragSelection = null;
+}
+
+async function loadMoreIfNeeded() {
+  const list = $("link-list");
+  if (state.loadingLinks || state.queuePaging) return;
+  if (!state.visibleLinks.length) return;
+  if (list.scrollTop < 24 && state.queueOffset > 0) {
+    await loadLinks(Math.max(0, state.queueOffset - state.queuePageSize), { mode: "prepend" });
+    return;
+  }
+  if (state.queueOffset + state.visibleLinks.length >= state.queueFiltered) return;
+  const remaining = list.scrollHeight - list.scrollTop - list.clientHeight;
+  if (remaining < 120) await loadLinks(state.queueOffset + state.visibleLinks.length, { mode: "append" });
+}
+
+async function refreshLinks() {
+  const btn = $("refresh-links-btn");
+  setBusy(btn, true, "Refreshing");
+  try {
+    clearSelection();
+    const res = await fetch("/links/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    $("queue-summary").textContent = `${data.count} refreshed`;
+    addMessage("tool", `Refreshed ${data.count} Eastself URLs`);
+    await loadLinks(0);
+  } catch (err) {
+    addMessage("tool", String(err));
+    $("queue-summary").textContent = String(err);
+  } finally {
+    setBusy(btn, false, "Refresh DB");
+  }
+}
+
+function setServiceChip(id, label, ready, detail) {
+  const chip = $(id);
+  chip.className = `service-chip ${ready ? "ready" : "error"}`;
+  chip.textContent = `${label}: ${ready ? "ready" : "offline"}`;
+  chip.title = detail || "";
+}
+
+function lastLogLine(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-1)[0] || "";
+}
+
+function renderServiceDetail(data) {
+  const detail = $("service-detail");
+  if (!detail) return;
+  const brain = data.brain || {};
+  const startup = data.startup || {};
+  const parts = [];
+  if (!brain.ready) {
+    parts.push("Brain offline");
+    if (brain.managed_exit_code !== null && brain.managed_exit_code !== undefined) {
+      parts.push(`exit ${brain.managed_exit_code}`);
+    }
+    if (brain.log_path) parts.push(brain.log_path);
+    const tail = lastLogLine(brain.log_tail);
+    if (tail) parts.push(tail);
+  }
+  if (startup.error) parts.push(startup.error);
+  detail.textContent = parts.join(" · ");
+  detail.title = [
+    brain.log_tail || "",
+    startup.error || "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function renderBrainModelSelect(brain) {
+  const select = $("brain-model-select");
+  if (!select) return;
+  const models = brain?.available_models || [];
+  const active = models.find((model) => model.active);
+  state.brainModels = models;
+  state.activeBrainModelId = active?.id || "";
+  const current = select.value;
+  const options = models
+    .filter((model) => model.exists && (model.source === "local" || model.active || model.id.startsWith("qwen")))
+    .map((model) => {
+      const vision = model.vision ? "vision" : model.vision === false ? "text" : "?";
+      const selected = model.active ? " selected" : "";
+      return `<option value="${esc(model.id)}"${selected}>${esc(model.label)} · ${vision}</option>`;
+    })
+    .join("");
+  select.innerHTML = `<option value="">Brain model</option>${options}`;
+  if (current && models.some((model) => model.id === current)) {
+    select.value = current;
+  } else if (active) {
+    select.value = active.id;
+  }
+}
+
+async function loadServices() {
+  try {
+    const res = await fetch(SERVICES_URL);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    setServiceChip("brain-chip", "Brain", data.brain?.ready, data.brain?.model);
+    setServiceChip("chrome-chip", "Chrome", data.chrome?.ready, data.chrome?.socket_path || data.chrome?.registry);
+    renderBrainModelSelect(data.brain);
+    renderServiceDetail(data);
+    state.chromeReady = Boolean(data.chrome?.ready);
+    if (state.chromeReady) showScreenshot();
+    const startup = data.startup || {};
+    if (startup.status === "starting" || startup.status === "busy") {
+      setBusy($("start-services-btn"), true, "Starting");
+    } else {
+      setBusy($("start-services-btn"), false, "Start Services");
+    }
+    if (startup.error && startup.error !== state.lastError) {
+      state.lastError = startup.error;
+      addMessage("tool", startup.error);
+    }
+  } catch (err) {
+    state.chromeReady = false;
+    setServiceChip("brain-chip", "Brain", false, String(err));
+    setServiceChip("chrome-chip", "Chrome", false, String(err));
+    const detail = $("service-detail");
+    if (detail) {
+      detail.textContent = String(err);
+      detail.title = String(err);
+    }
+  }
+}
+
+async function startServices() {
+  const btn = $("start-services-btn");
+  const modelId = $("brain-model-select")?.value || "";
+  setBusy(btn, true, "Starting");
+  try {
+    const res = await fetch("/services/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        brain: true,
+        chrome: true,
+        model_id: modelId || null,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    addMessage("tool", "Starting local MLX brain and Chrome transport");
+  } catch (err) {
+    addMessage("tool", String(err));
+    setBusy(btn, false, "Start Services");
+  } finally {
+    setTimeout(loadServices, 1000);
+  }
+}
+
+async function configureBrainModel() {
+  const select = $("brain-model-select");
+  const modelId = select?.value || "";
+  if (!modelId || modelId === state.activeBrainModelId) return;
+  setBusy($("start-services-btn"), true, "Switching");
+  try {
+    const res = await fetch("/services/brain", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_id: modelId, restart_brain: true }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    addMessage("tool", `Brain model selected: ${data.selected?.label || modelId}`);
+    await loadServices();
+  } catch (err) {
+    addMessage("tool", String(err));
+    await loadServices();
+  } finally {
+    setBusy($("start-services-btn"), false, "Start Services");
+  }
+}
+
+function fetchLink(id) {
+  const row = state.visibleLinks.find((link) => link.id === id);
+  if (!row) return;
+  state.currentId = row.id;
+  $("url-input").value = row.url;
+  clearChat();
+  setJobActive(true);
+  addMessage("user", `fetch: ${row.url}`);
+  renderLinks();
+  fetch("/crawl", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: row.id,
+      url: row.url,
+      reason: row.reason,
+      sub_reason: row.sub_reason,
+    }),
+  }).catch((err) => {
+    setJobActive(false);
+    addMessage("tool", String(err));
+  });
+}
+
+async function crawlAll() {
+  const q = $("link-search").value.trim();
+  const reason = $("reason-filter").value;
+  const status = $("status-filter").value;
+  const ids = Array.from(state.selectedIds);
+  const usingSelection = ids.length > 0;
+  const count = usingSelection ? ids.length : (state.queueFiltered || state.visibleLinks.length);
+  if (!count) {
+    addMessage("tool", usingSelection ? "No selected URLs to crawl" : "No filtered URLs to crawl");
+    return;
+  }
+  const ok = window.confirm(
+    `${usingSelection ? "Crawl selected" : "Crawl all"} ${count} ${usingSelection ? "selected" : "filtered"} URLs?\n\nThis uses your real Chrome profile and waits between URLs.`
+  );
+  if (!ok) {
+    addMessage("tool", `${usingSelection ? "Crawl selected" : "Crawl all"} canceled before starting`);
+    return;
+  }
+  clearChat();
+  setBusy($("crawl-all-btn"), true, "Running");
+  setJobActive(true);
+  addMessage("user", `${usingSelection ? "crawl selected" : "crawl all"}: ${count}`);
+  try {
+    const res = await fetch("/fetch-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        q,
+        reason,
+        status,
+        ids: usingSelection ? ids : null,
+        confirm_count: count,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    addMessage("tool", `Accepted ${data.count} URLs; ${data.delay_seconds}s + ${data.jitter_seconds}s jitter between URLs; ${data.timeout_seconds}s timeout`);
+    if (usingSelection) clearSelection();
+  } catch (err) {
+    setBusy($("crawl-all-btn"), false, usingSelection ? "Crawl Selected" : "Crawl All");
+    setJobActive(false);
+    addMessage("tool", String(err));
+  }
+}
+
+async function cancelJob() {
+  setBusy($("stop-job-btn"), true, "Stopping");
+  try {
+    const res = await fetch("/jobs/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    addMessage("tool", data.status === "canceling" ? "Cancel requested" : "No running job");
+    if (data.status !== "canceling") setJobActive(false);
+  } catch (err) {
+    addMessage("tool", String(err));
+  } finally {
+    setTimeout(() => setBusy($("stop-job-btn"), false, "Stop"), 1000);
+  }
+}
+
+function renderTrace(trace) {
+  if (!trace || !trace.length) {
+    state.traceEntries = [];
+    renderTimeline();
+    return;
+  }
+  state.traceEntries = trace.slice(-60).map((event, index) => {
+    const meta = Object.entries(event)
+      .filter(([key]) => key !== "message")
+      .map(([key, value]) => `${key}=${String(value)}`)
+      .join(" ");
+    return {
+      kind: "trace",
+      role: "trace",
+      content: event.message || "",
+      meta,
+      ts: traceTimestamp(event, index),
+      seq: index,
+    };
+  });
+  renderTimeline();
+}
+
+function renderKnowledge(notes) {
+  const list = $("knowledge-list");
+  if (!notes || !notes.length) {
+    renderEmpty(list, "No domain notes");
+    return;
+  }
+  list.innerHTML = notes.slice(-12).reverse().map((note) => `
+    <div class="knowledge-item">
+      <div>${esc(note.text)}</div>
+      <div class="knowledge-meta">${esc(note.source || "")} ${esc(note.ts || "")}</div>
+    </div>`).join("");
+}
+
+function renderPlaybooks(playbooks) {
+  const list = $("playbook-list");
+  if (!playbooks || !playbooks.length) {
+    renderEmpty(list, "No playbooks");
+    return;
+  }
+  list.innerHTML = playbooks.slice(-8).reverse().map((playbook) => {
+    const steps = (playbook.steps || []).slice(0, 6)
+      .map((step, idx) => `<div>${idx + 1}. ${esc(step)}</div>`)
+      .join("");
+    return `
+      <div class="playbook-item">
+        <div><strong>${esc(playbook.title || "Playbook")}</strong></div>
+        <div>${steps}</div>
+        <div class="knowledge-meta">${esc(playbook.source || "")} ${esc(playbook.ts || "")}</div>
+      </div>`;
+  }).join("");
+}
+
+async function saveDomainNote(event) {
+  event.preventDefault();
+  const input = $("domain-note-input");
+  const text = input.value.trim();
+  if (!text) return;
+  try {
+    const res = await fetch("/domain-note", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: state.currentUrl, host: state.currentHost, text }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    input.value = "";
+    renderKnowledge(data.notes);
+    renderPlaybooks(data.playbooks || []);
+  } catch (err) {
+    addMessage("tool", String(err));
+  }
+}
+
+async function saveDomainPlaybook(event) {
+  event.preventDefault();
+  const titleInput = $("domain-playbook-title");
+  const stepsInput = $("domain-playbook-steps");
+  const title = titleInput.value.trim();
+  const steps = stepsInput.value.trim();
+  if (!steps) return;
+  try {
+    const res = await fetch("/domain-playbook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: state.currentUrl, host: state.currentHost, title, steps }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    titleInput.value = "";
+    stepsInput.value = "";
+    renderPlaybooks(data.playbooks || []);
+  } catch (err) {
+    addMessage("tool", String(err));
+  }
+}
+
+function updateState(data) {
+  if (data.ping) return;
+
+  const terminal = ["done", "error", "idle", "canceled", "pending"].includes(data.status);
+  const status = data.error || data.status === "error" ? "error" : terminal ? "idle" : "active";
+  const isCrawlJob = data.id === "crawl-all" || Boolean(data.link_id) || Boolean(data.url);
+  setJobActive(!terminal && isCrawlJob);
+  setStatus(status, data.status || "idle");
+  setProgress(data.progress);
+  setMode(data.mode);
+  setUrl(data.url, data.note);
+
+  state.currentUrl = data.url || state.currentUrl;
+  state.currentHost = data.host || state.currentHost;
+  state.currentId = data.link_id || data.id || state.currentId;
+
+  $("dom-text").textContent = data.dom_text || (data.mode === "vision" ? "[vision fallback]" : "-");
+  $("error-text").textContent = data.error_detail || data.error || "-";
+  if (data.has_screenshot || state.chromeReady) showScreenshot();
+  renderTrace(data.trace);
+  renderKnowledge(data.domain_knowledge);
+  renderPlaybooks(data.domain_playbooks);
+
+  if (data.prompt && data.prompt !== state.lastPrompt) {
+    state.lastPrompt = data.prompt;
+    addMessage("user", data.prompt);
+  }
+  if (data.response) {
+    if (data.response !== state.lastResponse) {
+      state.lastResponse = data.response;
+      addMessage("assistant", data.response);
+    }
+  }
+  if (data.error && data.error !== state.lastError) {
+    state.lastError = data.error;
+    addMessage("tool", data.error);
+  }
+
+  if (["done", "error", "idle", "canceled"].includes(data.status)) {
+    setBusy($("crawl-btn"), false, "Crawl");
+    setBusy($("prompt-btn"), false, "Send");
+    setBusy($("stop-job-btn"), false, "Stop");
+    setJobActive(false);
+    if (data.id === "crawl-all" || data.status === "canceled") {
+      setBusy($("crawl-all-btn"), false, "Crawl All");
+      updateCrawlActionLabel();
+    }
+    loadLinks(state.queueOffset, { preserveScroll: true });
+  }
+}
+
+function connectEvents() {
+  const es = new EventSource(EVENTS_URL);
+  $("conn-status").textContent = "connected";
+
+  es.onmessage = (event) => {
+    try {
+      updateState(JSON.parse(event.data));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  es.onerror = () => {
+    $("conn-status").textContent = "reconnecting";
+    es.close();
+    setTimeout(connectEvents, 2000);
+  };
+}
+
+function bindEvents() {
+  bindPaneResizers();
+
+  $("crawl-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const url = $("url-input").value.trim();
+    if (!url) return;
+    setBusy($("crawl-btn"), true, "Crawling");
+    setJobActive(true);
+    clearChat();
+    addMessage("user", `crawl: ${url}`);
+    fetch("/crawl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    }).catch((err) => {
+      setBusy($("crawl-btn"), false, "Crawl");
+      setJobActive(false);
+      addMessage("tool", String(err));
+    });
+  });
+
+  $("prompt-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = $("prompt-input");
+    const instruction = input.value.trim();
+    if (!instruction) return;
+    input.value = "";
+    setBusy($("prompt-btn"), true, "Thinking");
+    state.lastPrompt = instruction;
+    addMessage("user", instruction);
+    fetch("/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction }),
+    }).catch((err) => {
+      setBusy($("prompt-btn"), false, "Send");
+      addMessage("tool", String(err));
+    });
+  });
+
+  $("domain-note-form").addEventListener("submit", saveDomainNote);
+  $("domain-playbook-form").addEventListener("submit", saveDomainPlaybook);
+  $("clear-chat-btn").addEventListener("click", clearActivity);
+  $("refresh-links-btn").addEventListener("click", refreshLinks);
+  $("crawl-all-btn").addEventListener("click", crawlAll);
+  $("stop-job-btn").addEventListener("click", cancelJob);
+  $("start-services-btn").addEventListener("click", startServices);
+  $("brain-model-select").addEventListener("change", configureBrainModel);
+  $("reason-filter").addEventListener("change", () => {
+    clearSelection();
+    loadLinks(0);
+  });
+  $("status-filter").addEventListener("change", () => {
+    clearSelection();
+    loadLinks(0);
+  });
+  $("link-search").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      clearSelection();
+      loadLinks(0);
+    }
+  });
+  $("link-list").addEventListener("pointerdown", beginLinkDragSelection);
+  $("link-list").addEventListener("pointerover", extendLinkDragSelection);
+  window.addEventListener("pointerup", endLinkDragSelection);
+  window.addEventListener("pointercancel", endLinkDragSelection);
+  $("link-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-fetch-id]");
+    if (button) {
+      event.stopPropagation();
+      fetchLink(button.dataset.fetchId);
+      return;
+    }
+    const row = event.target.closest("[data-link-id]");
+    if (row) handleLinkRowClick(event, row.dataset.linkId);
+  });
+  $("link-list").addEventListener("scroll", loadMoreIfNeeded);
+}
+
+loadPaneWidths();
+bindEvents();
+connectEvents();
+loadLinks(0);
+loadServices();
+renderTrace([]);
+renderKnowledge([]);
+renderPlaybooks([]);
+setJobActive(false);
+
+setInterval(() => {
+  if (state.chromeReady || $("status-dot").classList.contains("active") || $("status-dot").classList.contains("error")) {
+    showScreenshot();
+  }
+}, 3000);
+
+setInterval(loadServices, 5000);

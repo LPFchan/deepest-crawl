@@ -72,7 +72,7 @@ def _dom_or_vision(engine, tab, fail_note: str = "") -> Perception:
     try:
         path = h.capture_screenshot(max_dim=VISION_MAX_DIM)
         png = open(path, "rb").read()
-        return Perception(mode="vision", image_png=png,
+        return Perception(mode="vision", text=text or "", image_png=png,
                           note=(fail_note or "thin_dom") + ";vision")
     except Exception as e:
         return Perception(mode="dom", text=text or "",
