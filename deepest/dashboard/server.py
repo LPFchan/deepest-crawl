@@ -933,6 +933,41 @@ def _navigate_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
         return engine, tab
 
 
+def _wait_for_load_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
+                                     deadline: float, *, reason: str,
+                                     step_no: int | None = None):
+    try:
+        bh = engine.activate(tab)
+        bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+        return engine, tab, bh
+    except Exception as exc:
+        if not _is_tab_session_error(exc):
+            raise
+        trace = {
+            "ts": _now(),
+            "message": "tab detached while waiting for load; reconnecting",
+            "reason": reason,
+            "tab": getattr(tab, "id", ""),
+            "url": url,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if step_no is not None:
+            trace["step"] = step_no
+        STATE.push_trace(trace)
+        engine, tab = _navigate_with_tab_recovery(
+            engine,
+            tab,
+            url,
+            timeout_seconds,
+            deadline,
+            reason=reason,
+            step_no=step_no,
+        )
+        bh = engine.activate(tab)
+        bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+        return engine, tab, bh
+
+
 def _serialize(step: CrawlStep) -> dict:
     d = {
         "id": step.id,
@@ -1299,7 +1334,14 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                     deadline,
                     reason="direct archive fallback",
                 )
-                engine.activate(tab).wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                engine, tab, _ = _wait_for_load_with_tab_recovery(
+                    engine,
+                    tab,
+                    archive_url,
+                    timeout,
+                    deadline,
+                    reason="direct archive fallback",
+                )
                 _job_sleep(1, deadline)
                 url = engine.current_url(tab) or archive_url
                 STATE.update(url=url, host=_host_of(url))
@@ -2941,8 +2983,15 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                             reason="agent archive fallback",
                             step_no=step_no,
                         )
-                        bh = engine.activate(tab)
-                        bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                        engine, tab, bh = _wait_for_load_with_tab_recovery(
+                            engine,
+                            tab,
+                            archive_url,
+                            timeout,
+                            deadline,
+                            reason="agent archive fallback",
+                            step_no=step_no,
+                        )
                         _job_sleep(1, deadline)
                         continue
                 if down_reason and not verification_reason and url and _is_wayback_url(url):
@@ -2978,8 +3027,15 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                             reason="unavailable archive retry",
                             step_no=step_no,
                         )
-                        bh = engine.activate(tab)
-                        bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                        engine, tab, bh = _wait_for_load_with_tab_recovery(
+                            engine,
+                            tab,
+                            next_archive,
+                            timeout,
+                            deadline,
+                            reason="unavailable archive retry",
+                            step_no=step_no,
+                        )
                         _job_sleep(1, deadline)
                         continue
                     message = _content_down_failure_message(url, down_reason)
@@ -3194,8 +3250,15 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                                 reason="empty archive retry",
                                 step_no=step_no,
                             )
-                            bh = engine.activate(tab)
-                            bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                            engine, tab, bh = _wait_for_load_with_tab_recovery(
+                                engine,
+                                tab,
+                                next_archive,
+                                timeout,
+                                deadline,
+                                reason="empty archive retry",
+                                step_no=step_no,
+                            )
                             _job_sleep(1, deadline)
                             continue
                     failure = _content_down_failure_message(
@@ -3489,8 +3552,15 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     reason="agent archive tool",
                     step_no=step_no,
                 )
-                bh = engine.activate(tab)
-                bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                engine, tab, bh = _wait_for_load_with_tab_recovery(
+                    engine,
+                    tab,
+                    archive_url,
+                    timeout,
+                    deadline,
+                    reason="agent archive tool",
+                    step_no=step_no,
+                )
                 _job_sleep(1, deadline)
                 continue
 
