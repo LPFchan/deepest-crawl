@@ -203,6 +203,74 @@ def _is_wayback_url(url: str) -> bool:
     return _host_of(url) in {"archive.org", "web.archive.org"}
 
 
+def _wayback_original_url(url: str) -> str:
+    if not _is_wayback_url(url):
+        return url
+    match = re.search(r"/web/[^/]+/(https?://.+)$", url or "", re.I)
+    return match.group(1) if match else ""
+
+
+def _normal_url_key(url: str) -> str:
+    return (url or "").strip().rstrip("/").lower()
+
+
+def _wayback_snapshot_candidates(
+    url: str,
+    deadline: float | None = None,
+    *,
+    exclude_urls: set[str] | None = None,
+    limit: int = 12,
+) -> list[str]:
+    if not _env_enabled("DEEPEST_WAYBACK_ON_CONTENT_DOWN", True):
+        return []
+    source_url = _wayback_original_url(url)
+    if not source_url.startswith(("http://", "https://")) or _is_wayback_url(source_url):
+        return []
+    timeout = _env_float("DEEPEST_WAYBACK_CDX_TIMEOUT_SECONDS", 15.0)
+    if deadline is not None:
+        try:
+            timeout = _remaining_seconds(deadline, timeout)
+        except TimeoutError:
+            return []
+    excluded = {_normal_url_key(item) for item in (exclude_urls or set())}
+    api = (
+        "https://web.archive.org/cdx/search/cdx"
+        f"?url={quote(source_url, safe='')}"
+        "&output=json&fl=timestamp,original,statuscode,mimetype,digest"
+        "&filter=statuscode:200"
+        "&collapse=digest&sort=reverse"
+        f"&limit={max(1, limit)}"
+    )
+    try:
+        req = urllib.request.Request(
+            api,
+            headers={"User-Agent": "deepest-crawl/0.1 (+wayback fallback)"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            rows = json.loads(res.read().decode("utf-8", "replace"))
+        candidates: list[str] = []
+        for row in rows[1:] if isinstance(rows, list) else []:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            mimetype = str(row[3]).lower() if len(row) > 3 else ""
+            if mimetype and "html" not in mimetype and "text/plain" not in mimetype:
+                continue
+            ts, original = str(row[0]), str(row[1])
+            archive_url = f"https://web.archive.org/web/{ts}/{original}"
+            if _normal_url_key(archive_url) in excluded:
+                continue
+            candidates.append(archive_url)
+        return candidates
+    except Exception as exc:
+        STATE.push_trace({
+            "ts": _now(),
+            "message": "wayback cdx lookup failed",
+            "url": source_url,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        return []
+
+
 def _content_down_reason(text: str, status: int | None = None) -> str:
     if status in {404, 410, 451, 500, 502, 503, 504}:
         return f"http-{status}"
@@ -284,18 +352,28 @@ def _page_response_status(engine, tab) -> int | None:
         return None
 
 
-def _wayback_snapshot_url(url: str, deadline: float | None = None) -> str:
+def _wayback_snapshot_url(url: str, deadline: float | None = None,
+                          exclude_urls: set[str] | None = None) -> str:
     if not _env_enabled("DEEPEST_WAYBACK_ON_CONTENT_DOWN", True):
         return ""
-    if not url.startswith(("http://", "https://")) or _is_wayback_url(url):
+    source_url = _wayback_original_url(url)
+    if not source_url.startswith(("http://", "https://")) or _is_wayback_url(source_url):
         return ""
+    excluded = {_normal_url_key(item) for item in (exclude_urls or set())}
+    candidates = _wayback_snapshot_candidates(
+        source_url,
+        deadline,
+        exclude_urls=exclude_urls,
+    )
+    if candidates:
+        return candidates[0]
     timeout = 5.0
     if deadline is not None:
         try:
             timeout = _remaining_seconds(deadline, timeout)
         except TimeoutError:
             return ""
-    api = "https://archive.org/wayback/available?url=" + quote(url, safe="")
+    api = "https://archive.org/wayback/available?url=" + quote(source_url, safe="")
     try:
         req = urllib.request.Request(
             api,
@@ -304,16 +382,20 @@ def _wayback_snapshot_url(url: str, deadline: float | None = None) -> str:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             data = json.loads(res.read().decode("utf-8", "replace"))
         closest = (data.get("archived_snapshots") or {}).get("closest") or {}
-        if closest.get("available") and closest.get("url"):
-            return str(closest["url"])
+        closest_url = str(closest.get("url") or "")
+        if closest.get("available") and closest_url and _normal_url_key(closest_url) not in excluded:
+            return closest_url
     except Exception as exc:
         STATE.push_trace({
             "ts": _now(),
             "message": "wayback availability lookup failed",
-            "url": url,
+            "url": source_url,
             "error": f"{type(exc).__name__}: {exc}",
         })
-    return "https://web.archive.org/web/2/" + url
+    if exclude_urls:
+        return ""
+    fallback = "https://web.archive.org/web/2/" + source_url
+    return "" if _normal_url_key(fallback) in excluded else fallback
 
 
 def _load_json(path: Path, fallback):
@@ -1758,7 +1840,10 @@ AGENT_SYSTEM = (
     "Global content-down policy: if the page is 404, not found, removed, unavailable, "
     "or otherwise down, use the archive tool. Emit archive|current for the current page, "
     "archive|original for the user's original URL, or archive|URL for a specific target. "
-    "Then crawl the archived content. Do not treat transient anti-bot or verification "
+    "Then crawl the archived content. If an archived snapshot is blank, empty, or has "
+    "no readable content, do not output done; use archive|original to search another "
+    "capture, or report failure only after archive search is exhausted. Do not treat "
+    "transient anti-bot or verification "
     "screens as content-down. If the page says Cloudflare, checking your browser, "
     "security check, or just a moment without a visible control, use wait|5 once "
     "and let Chrome complete the check. If there is a visible 'verify you are human' "
@@ -2050,6 +2135,32 @@ def _summary_is_barebones(summary: str, obs: dict) -> bool:
     return False
 
 
+def _summary_reports_unavailable(summary: str) -> str:
+    lower = " ".join((summary or "").lower().split())
+    if not lower:
+        return "empty summary"
+    markers = (
+        "page is empty",
+        "page appears to be empty",
+        "page appears to be blank",
+        "blank page",
+        "empty page",
+        "empty with no visible content",
+        "no visible content",
+        "no extracted text",
+        "no readable content",
+        "no readable dom text",
+        "content-down",
+        "content down",
+        "page is unavailable",
+        "nothing to summarize",
+    )
+    for marker in markers:
+        if marker in lower:
+            return marker
+    return ""
+
+
 def _extraction_summary_prompt(instruction: str, url: str, obs: dict,
                                candidate: str, content: str) -> str:
     extracted = obs.get("extracted") if isinstance(obs, dict) else {}
@@ -2091,7 +2202,10 @@ def _summary_verifier_prompt(instruction: str, url: str, obs: dict,
         "navigation chrome, vague paraphrase, missing the cause of the article, or "
         "contradicts the extracted content. Decline if it mentions generic page chrome "
         "such as navigation links, social media links, search bars, menus, sidebars, "
-        "footers, or extraction internals such as 'Extracted main content'.\n\n"
+        "footers, or extraction internals such as 'Extracted main content'. Decline "
+        "if it merely says the page is empty, blank, unavailable, or has no visible "
+        "content; that is a crawl failure or archive-search task, not a successful "
+        "page summary.\n\n"
         "Output exactly one line:\n"
         "accept|short reason\n"
         "decline|short reason\n\n"
@@ -2128,6 +2242,13 @@ def _parse_verifier_response(text: str) -> dict | None:
 def _verify_summary_candidate(brain, instruction: str, url: str, obs: dict,
                               candidate: str, content: str, deadline: float,
                               timeout: float, step_no: int) -> dict | None:
+    unavailable_reason = _summary_reports_unavailable(candidate)
+    if unavailable_reason:
+        return {
+            "accepted": False,
+            "reason": f"candidate reports unavailable content: {unavailable_reason}",
+            "raw": candidate,
+        }
     if _word_count(content) < 80:
         return None
     try:
@@ -2709,7 +2830,8 @@ def _safe_press_key(engine, tab, key: str, *, step_no: int) -> bool:
 
 
 def _archive_action_url(target: str, current_url: str, initial_url: str,
-                        deadline: float) -> tuple[str, str]:
+                        deadline: float,
+                        exclude_urls: set[str] | None = None) -> tuple[str, str]:
     requested = (target or "current").strip()
     lowered = requested.lower()
     if lowered == "current":
@@ -2720,7 +2842,8 @@ def _archive_action_url(target: str, current_url: str, initial_url: str,
         source_url = requested
     else:
         source_url = current_url or initial_url
-    return source_url, _wayback_snapshot_url(source_url, deadline)
+    source_url = _wayback_original_url(source_url)
+    return source_url, _wayback_snapshot_url(source_url, deadline, exclude_urls=exclude_urls)
 
 
 def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float | None = None,
@@ -2790,10 +2913,11 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 ):
                     archive_tried_urls.add(url)
                     archive_url = (
-                        _wayback_snapshot_url(url, deadline)
-                        or _wayback_snapshot_url(initial_url, deadline)
+                        _wayback_snapshot_url(url, deadline, exclude_urls=archive_tried_urls)
+                        or _wayback_snapshot_url(initial_url, deadline, exclude_urls=archive_tried_urls)
                     )
                     if archive_url:
+                        archive_tried_urls.add(archive_url)
                         STATE.update(
                             status="navigating",
                             url=archive_url,
@@ -2822,6 +2946,42 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         _job_sleep(1, deadline)
                         continue
                 if down_reason and not verification_reason and url and _is_wayback_url(url):
+                    archive_tried_urls.add(url)
+                    source_url = _wayback_original_url(url) or _wayback_original_url(initial_url)
+                    next_archive = _wayback_snapshot_url(
+                        source_url,
+                        deadline,
+                        exclude_urls=archive_tried_urls,
+                    )
+                    if next_archive:
+                        archive_tried_urls.add(next_archive)
+                        STATE.update(
+                            status="navigating",
+                            note="archived page unavailable; trying another snapshot",
+                            url=next_archive,
+                            host=_host_of(next_archive),
+                        )
+                        STATE.push_trace({
+                            "ts": _now(),
+                            "message": "archived page unavailable; trying another snapshot",
+                            "step": step_no,
+                            "reason": down_reason,
+                            "url": url,
+                            "archive_url": next_archive,
+                        })
+                        engine, tab = _navigate_with_tab_recovery(
+                            engine,
+                            tab,
+                            next_archive,
+                            timeout,
+                            deadline,
+                            reason="unavailable archive retry",
+                            step_no=step_no,
+                        )
+                        bh = engine.activate(tab)
+                        bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                        _job_sleep(1, deadline)
+                        continue
                     message = _content_down_failure_message(url, down_reason)
                     STATE.push_trace({
                         "ts": _now(),
@@ -2998,6 +3158,59 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         "step": step_no,
                     })
                 extraction_text = _best_text_for_extraction(obs, dom)
+                unavailable_reason = _summary_reports_unavailable(answer)
+                if unavailable_reason:
+                    if (last_url or url) and _is_wayback_url(last_url or url):
+                        archive_tried_urls.add(last_url or url)
+                        source_url = _wayback_original_url(last_url or url) or _wayback_original_url(initial_url)
+                        next_archive = _wayback_snapshot_url(
+                            source_url,
+                            deadline,
+                            exclude_urls=archive_tried_urls,
+                        )
+                        if next_archive:
+                            archive_tried_urls.add(next_archive)
+                            STATE.update(
+                                status="navigating",
+                                note="archived page empty; trying another snapshot",
+                                url=next_archive,
+                                host=_host_of(next_archive),
+                                response=answer,
+                            )
+                            STATE.push_trace({
+                                "ts": _now(),
+                                "message": "summary reports archived page empty; trying another snapshot",
+                                "step": step_no,
+                                "reason": unavailable_reason,
+                                "url": last_url or url,
+                                "archive_url": next_archive,
+                            })
+                            engine, tab = _navigate_with_tab_recovery(
+                                engine,
+                                tab,
+                                next_archive,
+                                timeout,
+                                deadline,
+                                reason="empty archive retry",
+                                step_no=step_no,
+                            )
+                            bh = engine.activate(tab)
+                            bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                            _job_sleep(1, deadline)
+                            continue
+                    failure = _content_down_failure_message(
+                        last_url or url,
+                        f"summary reports unavailable content: {unavailable_reason}",
+                    )
+                    STATE.update(error=failure, response=answer, status="error")
+                    _persist_agent_result(
+                        last_url or url,
+                        "failed",
+                        error=failure,
+                        error_detail=answer,
+                        source_link=source_link,
+                    )
+                    return
                 verification = _verify_summary_candidate(
                     brain,
                     instruction,
@@ -3144,6 +3357,21 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                             answer = _clean_final_summary(
                                 _fallback_summary(last_url or url, extraction_text, message)
                             )
+                unavailable_reason = _summary_reports_unavailable(answer)
+                if unavailable_reason:
+                    failure = _content_down_failure_message(
+                        last_url or url,
+                        f"summary reports unavailable content: {unavailable_reason}",
+                    )
+                    STATE.update(error=failure, response=answer, status="error")
+                    _persist_agent_result(
+                        last_url or url,
+                        "failed",
+                        error=failure,
+                        error_detail=answer,
+                        source_link=source_link,
+                    )
+                    return
                 STATE.update(status="done",
                              response=answer)
                 _persist_agent_result(last_url, "ok", summary=answer,
@@ -3225,6 +3453,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     last_url or url,
                     initial_url,
                     deadline,
+                    exclude_urls=archive_tried_urls | {last_url or url},
                 )
                 if not archive_url:
                     STATE.push_trace({
@@ -3236,6 +3465,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     })
                     STATE.update(note="archive snapshot unavailable")
                     continue
+                archive_tried_urls.add(archive_url)
                 STATE.update(
                     status="navigating",
                     note="opening Internet Archive snapshot",
