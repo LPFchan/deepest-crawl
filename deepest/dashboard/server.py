@@ -165,6 +165,22 @@ def _host_of(url: str) -> str:
     return (urlparse(url).hostname or "").removeprefix("www.").lower()
 
 
+def _domain_memory_target_from_state() -> tuple[str, str]:
+    candidates: list[str] = []
+    if STATE.current.url:
+        candidates.append(STATE.current.url)
+    for event in reversed(STATE.current.trace[-40:]):
+        url = event.get("url") or event.get("archive_url")
+        if isinstance(url, str) and url:
+            candidates.append(url)
+    for url in candidates:
+        source_url = _wayback_original_url(url)
+        host = _host_of(source_url)
+        if host and host != "web.archive.org":
+            return host, source_url
+    return "", ""
+
+
 def _safe_link_id(url: str) -> str:
     return hashlib.sha1(url.encode()).hexdigest()[:12]
 
@@ -637,6 +653,51 @@ def _domain_instruction_text(knowledge: dict) -> str:
         lines.append("Domain notes:")
         lines.extend(f"- {note}" for note in notes)
     return "\n".join(lines)
+
+
+def _operator_memory_command(text: str) -> str:
+    normalized = (text or "").strip()
+    match = re.match(
+        r"(?is)^\s*add\s+to\s+domain\s+(?:memory|playbook)\s*:?\s*(.+)$",
+        normalized,
+    )
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _save_operator_memory_command(text: str) -> dict:
+    memory_text = _operator_memory_command(text)
+    if not memory_text:
+        return {}
+    explicit_url = _extract_url(memory_text) or _extract_url(text)
+    if explicit_url:
+        host = _host_of(_wayback_original_url(explicit_url))
+        url = explicit_url
+    else:
+        host, url = _domain_memory_target_from_state()
+    if not host:
+        raise ValueError("No active domain to attach memory to.")
+    data = _append_domain_note(host, "operator", memory_text, url)
+    data = _append_domain_playbook(host, "operator", "Operator workaround", memory_text, url)
+    if STATE.current.host in {host, "web.archive.org", ""}:
+        STATE.update(
+            domain_knowledge=data.get("notes", []),
+            domain_playbooks=data.get("playbooks", []),
+        )
+    STATE.push_trace({
+        "ts": _now(),
+        "message": "operator domain memory saved",
+        "host": host,
+        "text": memory_text,
+    })
+    return {
+        "status": "saved",
+        "host": host,
+        "url": url,
+        "notes": data.get("notes", []),
+        "playbooks": data.get("playbooks", []),
+    }
 
 
 def _trace(message: str, **fields) -> None:
@@ -1364,6 +1425,27 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
         _publish_screenshot(engine, tab, "post-perception browser screenshot")
         response_status = _page_response_status(engine, tab)
         down_reason = _content_down_reason(p.text or "", response_status)
+        if down_reason and not _is_wayback_url(current_url) and knowledge.get("playbooks"):
+            STATE.push_trace({
+                "ts": _now(),
+                "message": "content down; trying domain playbook before archive",
+                "reason": down_reason,
+                "url": current_url,
+                "playbooks": len(knowledge.get("playbooks", [])),
+            })
+            instruction = (
+                f"Go to {url} and crawl it. Use the domain memory/playbooks if they apply. "
+                "The current page appears content-down; try any concrete domain playbook "
+                "for this URL before using the Internet Archive. If no playbook applies, "
+                "use the Internet Archive / Wayback Machine for the URL."
+            )
+            _do_agentic(
+                instruction,
+                initial_url=url,
+                timeout_seconds=_remaining_seconds(deadline, timeout),
+                source_link=link,
+            )
+            return
         if down_reason and not _is_wayback_url(current_url):
             archive_url = _wayback_snapshot_url(current_url, deadline) or _wayback_snapshot_url(url, deadline)
             if archive_url:
@@ -1930,7 +2012,9 @@ AGENT_SYSTEM = (
     "menus, sidebars, footers, or extraction internals such as 'Extracted main content'.\n"
     "Do not invent or call tools/functions outside the formats listed above.\n\n"
     "Global content-down policy: if the page is 404, not found, removed, unavailable, "
-    "or otherwise down, use the archive tool. Cloudflare origin errors such as "
+    "or otherwise down, first apply any concrete domain playbook that matches "
+    "the current URL or page state. If no playbook applies, use the archive tool. "
+    "Cloudflare origin errors such as "
     "520, 521, 522, 523, 524, 525, 526, 527, and 530 are content-down states, "
     "not verification challenges. Emit archive|current for the current page, "
     "archive|original for the user's original URL, or archive|URL for a specific target. "
@@ -2234,11 +2318,14 @@ def _summary_reports_unavailable(summary: str) -> str:
     if not lower:
         return "empty summary"
     markers = (
+        "about:blank",
         "page is empty",
         "page appears to be empty",
         "page appears to be blank",
         "blank page",
         "empty page",
+        "has no content",
+        "with no content",
         "empty with no visible content",
         "no visible content",
         "no extracted text",
@@ -3003,6 +3090,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 if (
                     down_reason and not verification_reason
                     and url and not _is_wayback_url(url)
+                    and not knowledge.get("playbooks")
                     and url not in archive_tried_urls
                 ):
                     archive_tried_urls.add(url)
@@ -3145,6 +3233,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 f"Title: {obs.get('title', '')}\n"
                 f"Scroll: {json.dumps(obs.get('scroll', {}), ensure_ascii=False)}\n"
                 f"Transient verification: {verification_reason or 'none'}\n"
+                f"Content-down reason: {down_reason or 'none'}\n"
                 f"Visible controls:\n{json.dumps(obs.get('controls', [])[:30], ensure_ascii=False)}\n"
                 f"Visible inputs:\n{json.dumps(obs.get('inputs', [])[:20], ensure_ascii=False)}\n"
                 f"Visible forms:\n{json.dumps(obs.get('forms', [])[:10], ensure_ascii=False)}\n"
@@ -3267,6 +3356,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     })
                 extraction_text = _best_text_for_extraction(obs, dom)
                 unavailable_reason = _summary_reports_unavailable(answer)
+                if not unavailable_reason and (last_url or url) == "about:blank":
+                    unavailable_reason = "about:blank"
                 if unavailable_reason:
                     if (last_url or url) and _is_wayback_url(last_url or url):
                         archive_tried_urls.add(last_url or url)
@@ -4033,10 +4124,16 @@ _LOGIN_SUBMIT_JS = lambda selector: f"""
 @app.post("/agent")
 async def agent(req: AgentRequest):
     from fastapi.responses import JSONResponse
-    if _RUN_LOCK.locked():
-        return JSONResponse({"error": "Another crawl job is already running."}, status_code=409)
     if not req.instruction:
         return JSONResponse({"error": "Empty instruction"}, status_code=400)
+    try:
+        memory_result = _save_operator_memory_command(req.instruction)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if memory_result:
+        return memory_result
+    if _RUN_LOCK.locked():
+        return JSONResponse({"error": "Another crawl job is already running."}, status_code=409)
     initial_url = _extract_url(req.instruction)
     if _is_direct_crawl_instruction(req.instruction, initial_url):
         link = {
