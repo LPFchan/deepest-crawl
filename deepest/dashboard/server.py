@@ -3264,6 +3264,36 @@ def _click_xy(engine, tab, x: float, y: float) -> None:
     engine.cdp(tab, "Input.dispatchMouseEvent", {"type": "mouseReleased", **params})
 
 
+def _vision_xy_to_css(engine, tab, x: float, y: float) -> tuple[float, float]:
+    """Map the vision model's click coordinate to a CSS click coordinate.
+
+    Holo grounds in a 0-1000 normalized space over the screenshot it sees, so the
+    raw values are NOT pixels: css = coord / 1000 * viewport_dim. The image->viewport
+    scale cancels out of the normalization, so only the live CSS viewport size is
+    needed (no screenshot measurement, correct at any device pixel ratio).
+
+    Measured: the model returned (274, 419) for a checkbox truly at ~(376, 331) on a
+    1372x790 viewport -> 274/1000*1372=376, 419/1000*790=331. Exact.
+    """
+    vp = _viewport_size(engine, tab) or {}
+    w = float(vp.get("w") or 0.0)
+    h = float(vp.get("h") or 0.0)
+    cx = (x / 1000.0 * w) if w else x
+    cy = (y / 1000.0 * h) if h else y
+    if w:
+        cx = min(max(0.0, cx), w - 1)
+    if h:
+        cy = min(max(0.0, cy), h - 1)
+    STATE.push_trace({
+        "ts": _now(),
+        "message": "click coordinate mapping",
+        "raw": [round(x, 1), round(y, 1)],
+        "viewport": [round(w, 1), round(h, 1)],
+        "css": [round(cx, 1), round(cy, 1)],
+    })
+    return cx, cy
+
+
 def _verification_click_target(engine, tab) -> dict | None:
     try:
         target = engine.evaluate(tab, """
@@ -4516,7 +4546,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     "y": action.get("y"),
                 })
                 if action["by"] == "xy":
-                    _click_xy(engine, tab, action["x"], action["y"])
+                    cx, cy = _vision_xy_to_css(engine, tab, action["x"], action["y"])
+                    _click_xy(engine, tab, cx, cy)
                     _job_sleep(2, deadline)
                     continue
                 if action["by"] == "text":
@@ -4570,7 +4601,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     "y": action.get("y"),
                 })
                 if action.get("by") == "xy":
-                    _click_xy(engine, tab, action["x"], action["y"])
+                    cx, cy = _vision_xy_to_css(engine, tab, action["x"], action["y"])
+                    _click_xy(engine, tab, cx, cy)
                     _job_sleep(0.2, deadline)
                     _type_text(engine, tab, action["text"])
                 elif action.get("by") == "text":
