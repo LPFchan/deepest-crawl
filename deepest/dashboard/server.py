@@ -1071,17 +1071,139 @@ def _wait_for_load_with_tab_recovery(engine, tab, url: str, timeout_seconds: flo
         return engine, tab, bh
 
 
+def _is_real_content_url(url: str) -> bool:
+    """True for an http(s) page URL, false for about:blank/chrome:// and friends."""
+    return (url or "").strip().lower().startswith(("http://", "https://"))
+
+
+def _snapshot_tab_ids(engine) -> set:
+    """Capture the engine's known tab ids so newly spawned tabs can be detected."""
+    ids: set = set()
+    for getter in (getattr(engine, "session_tabs", None), getattr(engine, "user_tabs", None)):
+        if getter is None:
+            continue
+        try:
+            for tab in getter() or []:
+                tid = tab.get("id") if isinstance(tab, dict) else None
+                if tid is not None:
+                    ids.add(tid)
+        except Exception:
+            continue
+    return ids
+
+
+def _find_spawned_content_tab(engine, opener_tab, before_ids: set, original_url: str):
+    """Find a tab opened after `before_ids` that holds real content.
+
+    Generic across providers: any link that opens its destination in a new tab
+    (window.open / target=_blank / app deep links) leaves the opener stranded;
+    the spawned tab is the one that appeared since the snapshot and carries an
+    http(s) URL. Restricting to newly appeared ids avoids hijacking the user's
+    own pre-existing tabs.
+    """
+    opener_id = getattr(opener_tab, "id", None)
+    original_host = _host_of(original_url)
+    seen: set = set()
+    candidates: list[tuple] = []
+    for getter in (getattr(engine, "user_tabs", None), getattr(engine, "session_tabs", None)):
+        if getter is None:
+            continue
+        try:
+            tabs = getter() or []
+        except Exception:
+            continue
+        for tab in tabs:
+            if not isinstance(tab, dict):
+                continue
+            tid = tab.get("id")
+            if tid is None or tid in seen:
+                continue
+            seen.add(tid)
+            if tid in before_ids or tid == opener_id:
+                continue
+            tab_url = str(tab.get("url", ""))
+            if not _is_real_content_url(tab_url):
+                continue
+            candidates.append((tid, tab_url))
+    if not candidates:
+        return None, ""
+    # Prefer a destination on a different host than the original (short) link.
+    candidates.sort(key=lambda c: _host_of(c[1]) == original_host)
+    return candidates[0]
+
+
+def _adopt_spawned_content_tab(engine, tab, url: str, before_ids: set,
+                               timeout_seconds: float, deadline: float, *,
+                               reason: str, step_no: int | None = None):
+    """If the opener is stranded at about:blank/detached, switch to the tab the
+    link spawned. Returns the (engine, tab) to keep crawling; unchanged when the
+    opener is healthy or no spawned content tab is found."""
+    if before_ids is None:
+        return engine, tab
+    opener_url = ""
+    stranded = False
+    try:
+        opener_url = engine.current_url(tab) or ""
+        stranded = not _is_real_content_url(opener_url)
+    except Exception as exc:
+        if not _is_tab_session_error(exc):
+            raise
+        stranded = True
+    if not stranded:
+        return engine, tab
+    spawned_id, spawned_url = _find_spawned_content_tab(engine, tab, before_ids, url)
+    if spawned_id is None:
+        return engine, tab
+    try:
+        new_tab = engine.claim_tab(int(spawned_id))
+    except Exception as exc:
+        trace = {
+            "ts": _now(),
+            "message": "failed to adopt spawned content tab",
+            "reason": reason,
+            "spawned_tab": spawned_id,
+            "spawned_url": spawned_url,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if step_no is not None:
+            trace["step"] = step_no
+        STATE.push_trace(trace)
+        return engine, tab
+    trace = {
+        "ts": _now(),
+        "message": "adopted tab spawned by new-tab redirect link",
+        "reason": reason,
+        "opener_url": opener_url or "about:blank",
+        "spawned_tab": spawned_id,
+        "spawned_url": spawned_url,
+    }
+    if step_no is not None:
+        trace["step"] = step_no
+    STATE.push_trace(trace)
+    _close_job_tab(engine, tab, reason="stranded opener after new-tab redirect")
+    _set_active_tab(engine, new_tab)
+    return engine, new_tab
+
+
 def _perceive_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
                                 deadline: float, *, reason: str,
+                                before_tab_ids: set | None = None,
                                 step_no: int | None = None):
     """Perceive the page, recovering when the tab session detaches.
 
-    Freshly opened tabs and redirecting short links (e.g. spotify.link) can
-    momentarily report 'Debugger unattached' because the CDP session is still
-    attached to the pre-redirect target. Reclaim the tab and re-settle the load
-    before retrying so a transient detach does not fail the whole crawl.
+    Two failure modes are handled:
+    - A link opens its destination in a NEW tab and leaves the opener at
+      about:blank (e.g. spotify.link and other app/deep links). The opener is
+      adopted onto the spawned content tab via `before_tab_ids`.
+    - A freshly opened/redirecting tab momentarily reports 'Debugger unattached'
+      because the CDP session is still attached to the pre-redirect target; the
+      tab is reclaimed and the load re-settled before retrying.
     """
     from ..perception.policy import perceive
+    engine, tab = _adopt_spawned_content_tab(
+        engine, tab, url, before_tab_ids, timeout_seconds, deadline,
+        reason=reason, step_no=step_no,
+    )
     try:
         return engine, tab, perceive(engine, tab, url)
     except Exception as exc:
@@ -1098,6 +1220,13 @@ def _perceive_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
         if step_no is not None:
             trace["step"] = step_no
         STATE.push_trace(trace)
+    # A detach often means the content moved to a spawned tab; try adoption first.
+    adopted_engine, adopted_tab = _adopt_spawned_content_tab(
+        engine, tab, url, before_tab_ids, timeout_seconds, deadline,
+        reason=reason, step_no=step_no,
+    )
+    if getattr(adopted_tab, "id", None) != getattr(tab, "id", None):
+        return adopted_engine, adopted_tab, perceive(adopted_engine, adopted_tab, url)
     engine, tab = _navigate_with_tab_recovery(
         engine, tab, url, timeout_seconds, deadline, reason=reason, step_no=step_no,
     )
@@ -1435,6 +1564,7 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
         engine = _ensure_engine(_remaining_seconds(deadline, timeout))
         STATE.update(status="navigating")
         _trace("opening tab", url=url)
+        pre_open_tab_ids = _snapshot_tab_ids(engine)
         engine, tab = _new_tab_with_retry(
             engine,
             url,
@@ -1443,12 +1573,17 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
         )
         _set_active_tab(engine, tab)
         _job_sleep(2, deadline)
+        engine, tab = _adopt_spawned_content_tab(
+            engine, tab, url, pre_open_tab_ids, timeout, deadline,
+            reason="initial open",
+        )
         _publish_screenshot(engine, tab, "initial browser screenshot")
 
         _check_job_open(deadline)
         _trace("perceiving page")
         engine, tab, p = _perceive_with_tab_recovery(
             engine, tab, url, timeout, deadline, reason="initial perception",
+            before_tab_ids=pre_open_tab_ids,
         )
         _set_active_tab(engine, tab)
         current_url = engine.current_url(tab) or url
@@ -3361,6 +3496,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     try:
         _check_job_open(deadline)
         engine = _ensure_engine(_remaining_seconds(deadline, timeout))
+        pre_open_tab_ids = _snapshot_tab_ids(engine)
         engine, tab = _new_tab_with_retry(engine, None, timeout, deadline)
         _set_active_tab(engine, tab)
         engine.cdp(tab, "Page.enable")
@@ -3374,6 +3510,11 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             })
             engine.navigate(tab, initial_url)
             bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+            engine, tab = _adopt_spawned_content_tab(
+                engine, tab, initial_url, pre_open_tab_ids, timeout, deadline,
+                reason="initial agent navigation", step_no=0,
+            )
+            _set_active_tab(engine, tab)
 
         MAX_STEPS = 20
         for step_no in range(1, MAX_STEPS + 1):
