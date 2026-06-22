@@ -451,37 +451,6 @@ def _transient_verification_reason(text: str, status: int | None = None) -> str:
     return ""
 
 
-def _dom_verification_signal(engine, tab) -> str:
-    """Detect a verification wall whose challenge lives outside body innerText.
-
-    Cloudflare Turnstile renders its checkbox in a cross-origin
-    challenges.cloudflare.com iframe, so the marker text never reaches
-    document.body.innerText. Probe the live DOM for the challenge iframe, the
-    Turnstile widget container, or a challenge title instead. Returns a short
-    reason string, or '' when no such signal is present.
-    """
-    try:
-        signal = engine.evaluate(tab, r"""
-            (() => {
-              const title = (document.title || '').toLowerCase();
-              if (/just a moment|attention required|verifying you are|access denied/.test(title)) {
-                return 'title:' + title.slice(0, 40);
-              }
-              const iframe = document.querySelector(
-                'iframe[src*="challenges.cloudflare.com"], iframe[src*="/cdn-cgi/challenge"], iframe[title*="challenge" i]'
-              );
-              if (iframe) return 'cf-challenge-iframe';
-              if (document.querySelector('.cf-turnstile, #cf-chl-widget, #challenge-form, #challenge-stage, #turnstile-wrapper')) {
-                return 'cf-challenge-widget';
-              }
-              return '';
-            })()
-        """)
-        return str(signal or "").strip()
-    except Exception:
-        return ""
-
-
 def _page_response_status(engine, tab) -> int | None:
     try:
         status = engine.evaluate(tab, """
@@ -3621,10 +3590,10 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 last_host = host
                 last_dom = extraction_text or dom
                 response_status = _page_response_status(engine, tab)
-                verification_reason = (
-                    _transient_verification_reason(dom, response_status)
-                    or _dom_verification_signal(engine, tab)
-                )
+                verification_reason = _transient_verification_reason(dom, response_status)
+                # Non-DOM signal: when the page yields almost no readable text it is
+                # likely a wall/challenge the agent must handle by looking at it.
+                page_unreadable = len((extraction_text or dom or "").strip()) < 200
                 down_reason = _content_down_reason(dom, response_status)
                 if _is_wayback_url(url) and not verification_reason and wayback_redirect_hops < 4:
                     redirect_target = _wayback_redirect_target(engine, tab, url)
@@ -3828,7 +3797,12 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 "A screenshot of the current browser viewport is attached. "
                 "Use it to locate visible verification widgets, checkboxes, or buttons. "
                 "When clicking from the screenshot, output click|xy|x|y using CSS viewport "
-                "coordinates from the top-left of the screenshot/browser viewport."
+                "coordinates from the top-left of the screenshot/browser viewport. "
+                "For a verification checkbox such as an 'I am not a robot' / Cloudflare / "
+                "Turnstile control, you MUST click it by coordinates with click|xy at the "
+                "center of the checkbox. Do not use click|text or click|css for verification "
+                "controls: they sit inside a cross-origin frame and only a coordinate click "
+                "will reach them."
             )
             try:
                 if brain is None:
@@ -3846,14 +3820,14 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         timeout,
                         step_no,
                     )
-                elif verification_reason and getattr(brain, "has_vision", lambda: False)():
+                elif (verification_reason or page_unreadable) and getattr(brain, "has_vision", lambda: False)():
                     png = _try_screenshot(engine, tab, attempts=1)
                     if png:
                         STATE.push_trace({
                             "ts": _now(),
                             "message": "agent brain step using screenshot vision",
                             "step": step_no,
-                            "reason": verification_reason,
+                            "reason": verification_reason or "page unreadable; using vision",
                         })
                         response = _call_brain_with_retry(
                             lambda call_timeout: brain.complete_with_image(
@@ -4373,9 +4347,19 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     elif isinstance(clicked, dict) and clicked.get("ok"):
                         _job_sleep(3, deadline)
                     else:
-                        STATE.update(error=f"element not found: {action['value']}",
-                                     status="error")
-                        return
+                        # Missed text match is not fatal. The control is often inside a
+                        # cross-origin frame (e.g. an "I am not a robot" checkbox) that
+                        # text matching can never reach; keep going so the vision step can
+                        # retry with a coordinate click|xy instead of killing the crawl.
+                        STATE.push_trace({
+                            "ts": _now(),
+                            "message": "click text target not found; continuing for vision retry",
+                            "step": step_no,
+                            "value": action["value"],
+                        })
+                        STATE.update(note=f"element not found: {action['value']}; will retry visually")
+                        _job_sleep(1, deadline)
+                        continue
                 else:
                     engine.evaluate(tab, f"""
                         (()=>{{const el=document.querySelector({json.dumps(action['value'])});
@@ -4555,29 +4539,11 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         )
                         return
                     verification_waits[verify_key] = wait_count + 1
-                elif consecutive_waits >= 3 and not _is_wayback_url(last_url or url):
-                    # Anti-stall: never wait forever. Repeated no-progress waits
-                    # (e.g. an undetected verification wall) escalate to a click,
-                    # then fail with a clear reason instead of looping to timeout.
-                    verify_key = last_url or url or initial_url
-                    click_count = verification_clicks.get(verify_key, 0)
-                    if click_count < 2:
-                        verification_clicks[verify_key] = click_count + 1
-                        STATE.update(note="page stalled on repeated waits; attempting verification click")
-                        STATE.push_trace({
-                            "ts": _now(),
-                            "message": "stalled on repeated waits; attempting verification click",
-                            "step": step_no,
-                            "waits": consecutive_waits,
-                            "attempt": click_count + 1,
-                            "url": verify_key,
-                        })
-                        if _try_verification_click(engine, tab, step_no=step_no):
-                            _job_sleep(8, deadline)
-                        else:
-                            _job_sleep(3, deadline)
-                        consecutive_waits = 0
-                        continue
+                elif consecutive_waits >= 5 and not _is_wayback_url(last_url or url):
+                    # Anti-stall backstop: never wait forever. The vision + click|xy
+                    # path is what solves verification walls; if the agent only ever
+                    # waits and the page never advances, fail with a clear reason
+                    # instead of looping to the job timeout.
                     message = (
                         "Page did not progress after repeated waits; likely an unsolved "
                         "verification or load wall."
@@ -4587,7 +4553,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         "message": "giving up after stalled waits",
                         "step": step_no,
                         "waits": consecutive_waits,
-                        "url": verify_key,
+                        "url": last_url or url,
                     })
                     STATE.update(error=message, status="error")
                     _persist_agent_result(last_url or url, "failed", error=message,
