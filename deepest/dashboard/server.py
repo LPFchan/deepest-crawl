@@ -271,7 +271,47 @@ def _wayback_snapshot_candidates(
         return []
 
 
+_CLOUDFLARE_ORIGIN_DOWN_STATUSES = {520, 521, 522, 523, 524, 525, 526, 527, 530}
+
+_CLOUDFLARE_ORIGIN_DOWN_MARKERS = (
+    "cloudflare host error",
+    "error 520",
+    "error 521",
+    "error 522",
+    "error 523",
+    "error 524",
+    "error 525",
+    "error 526",
+    "error 527",
+    "error 530",
+    "web server is returning an unknown error",
+    "web server is down",
+    "web server is not returning a connection",
+    "origin is unreachable",
+    "connection timed out",
+    "ssl handshake failed",
+    "invalid ssl certificate",
+    "the web server reported a bad gateway error",
+    "contact your hosting provider",
+)
+
+
+def _cloudflare_origin_down_reason(text: str, status: int | None = None) -> str:
+    if status in _CLOUDFLARE_ORIGIN_DOWN_STATUSES:
+        return f"http-{status}"
+    sample = " ".join((text or "").lower().split())[:4000]
+    if not sample or "cloudflare" not in sample:
+        return ""
+    for marker in _CLOUDFLARE_ORIGIN_DOWN_MARKERS:
+        if marker in sample:
+            return marker
+    return ""
+
+
 def _content_down_reason(text: str, status: int | None = None) -> str:
+    cloudflare_reason = _cloudflare_origin_down_reason(text, status)
+    if cloudflare_reason:
+        return cloudflare_reason
     if status in {404, 410, 451, 500, 502, 503, 504}:
         return f"http-{status}"
     sample = " ".join((text or "").lower().split())[:4000]
@@ -306,6 +346,8 @@ def _content_down_failure_message(url: str, reason: str) -> str:
 
 
 def _transient_verification_reason(text: str, status: int | None = None) -> str:
+    if _cloudflare_origin_down_reason(text, status):
+        return ""
     sample = " ".join((text or "").lower().split())[:4000]
     if not sample:
         return ""
@@ -1880,7 +1922,9 @@ AGENT_SYSTEM = (
     "menus, sidebars, footers, or extraction internals such as 'Extracted main content'.\n"
     "Do not invent or call tools/functions outside the formats listed above.\n\n"
     "Global content-down policy: if the page is 404, not found, removed, unavailable, "
-    "or otherwise down, use the archive tool. Emit archive|current for the current page, "
+    "or otherwise down, use the archive tool. Cloudflare origin errors such as "
+    "520, 521, 522, 523, 524, 525, 526, 527, and 530 are content-down states, "
+    "not verification challenges. Emit archive|current for the current page, "
     "archive|original for the user's original URL, or archive|URL for a specific target. "
     "Then crawl the archived content. If an archived snapshot is blank, empty, or has "
     "no readable content, do not output done; use archive|original to search another "
