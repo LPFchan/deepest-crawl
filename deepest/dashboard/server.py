@@ -752,6 +752,13 @@ def _close_active_tab() -> None:
 def _close_job_tab(engine, tab, *, reason: str = "job cleanup") -> None:
     if engine is None or tab is None:
         return
+    benign_errors = (
+        "Debugger unattached",
+        "No tab with id",
+        "not part of browser session",
+        "No target with given id",
+        "Target closed",
+    )
     try:
         engine.cdp(tab, "Page.close", {})
         STATE.push_trace({
@@ -763,11 +770,7 @@ def _close_job_tab(engine, tab, *, reason: str = "job cleanup") -> None:
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         message = "browser tab close failed"
-        if (
-            "Debugger unattached" in error
-            or "No tab with id" in error
-            or "not part of browser session" in error
-        ):
+        if any(item in error for item in benign_errors):
             message = "browser tab already closed or detached"
         STATE.push_trace({
             "ts": _now(),
@@ -775,17 +778,6 @@ def _close_job_tab(engine, tab, *, reason: str = "job cleanup") -> None:
             "reason": reason,
             "tab": getattr(tab, "id", ""),
             "error": error,
-        })
-    try:
-        finalize = getattr(engine, "finalize", None)
-        if callable(finalize):
-            finalize([])
-    except Exception as exc:
-        STATE.push_trace({
-            "ts": _now(),
-            "message": "browser session tab cleanup failed",
-            "reason": reason,
-            "error": f"{type(exc).__name__}: {exc}",
         })
 
 
@@ -1986,6 +1978,8 @@ AGENT_SYSTEM = (
     "click|css|CSS selector\n"
     "click|xy|x|y\n"
     "type|css|CSS selector|text to type\n"
+    "type|xy|x|y|text to type\n"
+    "type|text|text to type into the currently focused field\n"
     "press|key\n"
     "submit|css|CSS selector\n"
     "autofill|bitwarden\n"
@@ -2011,6 +2005,9 @@ AGENT_SYSTEM = (
     "Do not mention generic site chrome such as navigation links, social media links, search bars, "
     "menus, sidebars, footers, or extraction internals such as 'Extracted main content'.\n"
     "Do not invent or call tools/functions outside the formats listed above.\n\n"
+    "For visual security pages that require typing, click the field first if needed, "
+    "then use type|text|... for the focused field and press|Enter to submit. "
+    "Use type|xy|x|y|... when the screenshot shows exactly where to type.\n\n"
     "Global content-down policy: if the page is 404, not found, removed, unavailable, "
     "or otherwise down, first apply any concrete domain playbook that matches "
     "the current URL or page state. If no playbook applies, use the archive tool. "
@@ -2034,6 +2031,8 @@ AGENT_SYSTEM = (
     "navigate|https://example.com\n"
     "click|text|SoundCloud\n"
     "type|css|#searchbox|hello world\n"
+    "type|text|123456\n"
+    "type|xy|420|315|123456\n"
     "press|Enter\n"
     "submit|css|form[role=search]\n"
     "autofill|bitwarden\n"
@@ -2496,8 +2495,27 @@ def _parse_action(text: str) -> dict:
                 except ValueError:
                     return {"action": "ask", "raw": text}
             return {"action": "click", "by": parts[1], "value": parts[2]}
-        if action == "type" and len(parts) >= 4:
-            return {"action": "type", "by": parts[1], "selector": parts[2], "text": parts[3]}
+        if action == "type" and len(parts) >= 3:
+            if parts[1] == "text":
+                return {"action": "type", "by": "text", "text": "|".join(parts[2:])}
+            if parts[1] == "xy" and len(parts) >= 5:
+                try:
+                    return {
+                        "action": "type",
+                        "by": "xy",
+                        "x": float(parts[2]),
+                        "y": float(parts[3]),
+                        "text": "|".join(parts[4:]),
+                    }
+                except ValueError:
+                    return {"action": "ask", "raw": text}
+            if len(parts) >= 4:
+                return {
+                    "action": "type",
+                    "by": parts[1],
+                    "selector": parts[2],
+                    "text": "|".join(parts[3:]),
+                }
         if action == "press" and len(parts) >= 2:
             return {"action": "press", "key": parts[1]}
         if action == "submit" and len(parts) >= 3:
@@ -2643,18 +2661,68 @@ def _observe_page(engine, tab) -> dict:
 
 def _press_key(engine, tab, key: str) -> None:
     key_map = {
-        "Enter": {"key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13},
-        "Tab": {"key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9},
-        "Escape": {"key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27},
-        "Backspace": {"key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8},
-        "PageDown": {"key": "PageDown", "code": "PageDown", "windowsVirtualKeyCode": 34},
-        "PageUp": {"key": "PageUp", "code": "PageUp", "windowsVirtualKeyCode": 33},
+        "Enter": (13, "Enter", "\r"),
+        "Return": (13, "Enter", "\r"),
+        "Tab": (9, "Tab", "\t"),
+        "Escape": (27, "Escape", ""),
+        "Backspace": (8, "Backspace", ""),
+        "Delete": (46, "Delete", ""),
+        " ": (32, "Space", " "),
+        "Space": (32, "Space", " "),
+        "ArrowLeft": (37, "ArrowLeft", ""),
+        "ArrowUp": (38, "ArrowUp", ""),
+        "ArrowRight": (39, "ArrowRight", ""),
+        "ArrowDown": (40, "ArrowDown", ""),
+        "Home": (36, "Home", ""),
+        "End": (35, "End", ""),
+        "PageDown": (34, "PageDown", ""),
+        "PageUp": (33, "PageUp", ""),
     }
-    spec = key_map.get(key, {"key": key, "code": key, "text": key if len(key) == 1 else ""})
-    down = {"type": "keyDown", **spec}
-    up = {"type": "keyUp", **{k: v for k, v in spec.items() if k != "text"}}
-    engine.cdp(tab, "Input.dispatchKeyEvent", down)
-    engine.cdp(tab, "Input.dispatchKeyEvent", up)
+    if key in key_map:
+        vk, code, text = key_map[key]
+    elif len(key) == 1:
+        if key.isalpha():
+            vk, code = ord(key.upper()), f"Key{key.upper()}"
+        elif key.isdigit():
+            vk, code = ord(key), f"Digit{key}"
+        else:
+            vk, code = ord(key), key
+        text = key
+    else:
+        vk, code, text = 0, key, ""
+    base = {
+        "key": " " if key == "Space" else key,
+        "code": code,
+        "windowsVirtualKeyCode": vk,
+        "nativeVirtualKeyCode": vk,
+    }
+    engine.cdp(tab, "Input.dispatchKeyEvent", {
+        "type": "keyDown",
+        **base,
+        **({"text": text} if text else {}),
+    })
+    if text and len(text) == 1:
+        engine.cdp(tab, "Input.dispatchKeyEvent", {
+            "type": "char",
+            "text": text,
+            **base,
+        })
+    engine.cdp(tab, "Input.dispatchKeyEvent", {"type": "keyUp", **base})
+
+
+def _type_text(engine, tab, text: str) -> None:
+    if not text:
+        return
+    engine.cdp(tab, "Input.insertText", {"text": text})
+    engine.evaluate(tab, """
+        (() => {
+          const el = document.activeElement;
+          if (!el) return false;
+          el.dispatchEvent(new Event('input', {bubbles: true}));
+          el.dispatchEvent(new Event('change', {bubbles: true}));
+          return true;
+        })()
+    """)
 
 
 def _dispatch_hotkey(engine, tab, key: str, modifiers: list[str]) -> None:
@@ -3808,14 +3876,32 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
 
             if action["action"] == "type":
                 mark_playbook_attempt(last_url or url, knowledge)
-                STATE.update(note=f"typing into {action['selector']}")
+                label = (
+                    f"{action.get('x')},{action.get('y')}"
+                    if action.get("by") == "xy" else
+                    action.get("selector", "focused element")
+                )
+                STATE.update(note=f"typing into {label}")
                 STATE.push_trace({
                     "ts": _now(),
                     "message": "typing",
                     "step": step_no,
-                    "selector": action["selector"],
+                    "by": action.get("by", "css"),
+                    "selector": action.get("selector", ""),
+                    "x": action.get("x"),
+                    "y": action.get("y"),
                 })
-                engine.evaluate(tab, _TYPE_JS(action["selector"], action["text"]))
+                if action.get("by") == "xy":
+                    _click_xy(engine, tab, action["x"], action["y"])
+                    _job_sleep(0.2, deadline)
+                    _type_text(engine, tab, action["text"])
+                elif action.get("by") == "text":
+                    _type_text(engine, tab, action["text"])
+                else:
+                    ok = engine.evaluate(tab, _TYPE_JS(action["selector"], action["text"]))
+                    if not ok:
+                        STATE.update(error=f"input not found: {action['selector']}", status="error")
+                        return
                 _job_sleep(0.5, deadline)
                 continue
 
