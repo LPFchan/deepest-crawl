@@ -2062,9 +2062,14 @@ PLAYBOOK_SYSTEM = (
     "scroll|up\n"
     "wait|seconds\n"
     "back\n"
-    "reload\n\n"
+    "reload\n"
+    "url|setparam|key|value (set or replace one query parameter on the current URL)\n"
+    "url|delparam|key (remove one query parameter from the current URL)\n"
+    "url|path|/new/path (replace only the path of the current URL)\n\n"
     "Archive actions are forbidden. Done/final summaries are forbidden. "
-    "If a playbook describes changing a URL, output navigate| with the changed URL."
+    "When a playbook only changes the query string or path of the current URL, "
+    "prefer the url| actions so the new URL is assembled deterministically instead "
+    "of writing it out by hand. Use navigate|URL only for a genuinely different URL."
 )
 
 
@@ -2543,6 +2548,19 @@ def _parse_action(text: str) -> dict:
         action = parts[0].lower().strip("`")
         if action == "navigate" and len(parts) >= 2:
             return {"action": "navigate", "url": parts[1]}
+        if action == "url" and len(parts) >= 3:
+            op = parts[1].lower()
+            if op == "path":
+                return {"action": "url", "op": "path", "path": "|".join(parts[2:])}
+            if op == "delparam":
+                return {"action": "url", "op": "delparam", "key": parts[2]}
+            if op == "setparam" and len(parts) >= 4:
+                return {
+                    "action": "url",
+                    "op": "setparam",
+                    "key": parts[2],
+                    "value": "|".join(parts[3:]),
+                }
         if action == "click" and len(parts) >= 3:
             if parts[1] == "xy" and len(parts) >= 4:
                 try:
@@ -3157,6 +3175,46 @@ def _archive_action_url(target: str, current_url: str, initial_url: str,
     return source_url, _wayback_snapshot_url(source_url, deadline, exclude_urls=exclude_urls)
 
 
+def _apply_url_rewrite(current_url: str, action: dict) -> str:
+    """Deterministically rewrite the current URL from a structured playbook url action.
+
+    Keeps query-string and path assembly out of the model's hands so playbook URL
+    changes are well-formed regardless of how the planner phrases them. Returns an
+    empty string when the action cannot produce a valid absolute URL.
+    """
+    if not current_url:
+        return ""
+    try:
+        parsed = urlparse(current_url)
+    except ValueError:
+        return ""
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    op = action.get("op")
+    if op == "path":
+        new_path = (action.get("path") or "").strip()
+        if not new_path:
+            return ""
+        if not new_path.startswith("/"):
+            new_path = "/" + new_path
+        parsed = parsed._replace(path=new_path)
+    elif op in {"setparam", "delparam"}:
+        key = (action.get("key") or "").strip()
+        if not key:
+            return ""
+        params = [
+            (k, v)
+            for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+            if k != key
+        ]
+        if op == "setparam":
+            params.append((key, action.get("value") or ""))
+        parsed = parsed._replace(query=urlencode(params))
+    else:
+        return ""
+    return urlunparse(parsed)
+
+
 def _playbook_action_prompt(instruction: str, url: str, knowledge_text: str,
                             down_reason: str, obs: dict, dom: str) -> str:
     return (
@@ -3186,6 +3244,27 @@ def _choose_playbook_action(brain_mod, instruction: str, url: str, knowledge_tex
         deadline, timeout, "domain playbook planner",
     )
     action = _parse_action(response)
+    if action.get("action") == "url":
+        rewritten = _apply_url_rewrite(url, action)
+        if rewritten and rewritten != url:
+            STATE.push_trace({
+                "ts": _now(),
+                "message": "domain playbook planner rewrote url",
+                "step": step_no,
+                "from": url,
+                "to": rewritten,
+                "op": action.get("op"),
+            })
+            action = {"action": "navigate", "url": rewritten}
+        else:
+            STATE.push_trace({
+                "ts": _now(),
+                "message": "domain playbook url rewrite produced no change",
+                "step": step_no,
+                "response": response,
+                "action": action,
+            })
+            action = {"action": "ask", "raw": response}
     if action.get("action") in {"archive", "done", "ask"}:
         STATE.push_trace({
             "ts": _now(),
