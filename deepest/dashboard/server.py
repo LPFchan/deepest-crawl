@@ -3231,13 +3231,20 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             playbook_key = _normal_url_key(_wayback_original_url(url) or url)
             playbook_block_count = playbook_archive_blocks.get(playbook_key, 0)
             playbook_attempted_here = playbook_key in playbook_attempted
+            STATE.push_trace({
+                "ts": _now(),
+                "message": "agent prompt domain memory",
+                "step": step_no,
+                "notes": len(knowledge.get("notes", [])),
+                "playbooks": len(knowledge.get("playbooks", [])),
+                "has_workarounds": bool(knowledge_text),
+            })
             extracted = obs.get("extracted") if isinstance(obs, dict) else {}
             article_text = extracted.get("text", "") if isinstance(extracted, dict) else ""
             article_source = extracted.get("source", "") if isinstance(extracted, dict) else ""
             article_words = extracted.get("words", 0) if isinstance(extracted, dict) else 0
             viewport_text = obs.get("viewport_text", "") if isinstance(obs, dict) else ""
             user_prompt = (
-                f"{AGENT_SYSTEM}\n\n"
                 f"--- PAGE STATE ---\n"
                 f"User instruction: {instruction}\n"
                 f"Current URL: {url}\n"
@@ -3295,9 +3302,9 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                             "reason": verification_reason,
                         })
                         response = _call_brain_with_retry(
-                            lambda call_timeout: brain.summarize_text(
-                                f"agent-step-{step_no}", user_prompt,
-                                max_chars=_agent_brain_max_chars(),
+                            lambda call_timeout: brain.complete(
+                                AGENT_SYSTEM,
+                                user_prompt,
                                 max_tokens=_agent_brain_max_tokens(),
                                 timeout=call_timeout,
                             ),
@@ -3305,9 +3312,9 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         )
                 else:
                     response = _call_brain_with_retry(
-                        lambda call_timeout: brain.summarize_text(
-                            f"agent-step-{step_no}", user_prompt,
-                            max_chars=_agent_brain_max_chars(),
+                        lambda call_timeout: brain.complete(
+                            AGENT_SYSTEM,
+                            user_prompt,
                             max_tokens=_agent_brain_max_tokens(),
                             timeout=call_timeout,
                         ),
