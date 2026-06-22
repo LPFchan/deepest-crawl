@@ -451,6 +451,37 @@ def _transient_verification_reason(text: str, status: int | None = None) -> str:
     return ""
 
 
+def _dom_verification_signal(engine, tab) -> str:
+    """Detect a verification wall whose challenge lives outside body innerText.
+
+    Cloudflare Turnstile renders its checkbox in a cross-origin
+    challenges.cloudflare.com iframe, so the marker text never reaches
+    document.body.innerText. Probe the live DOM for the challenge iframe, the
+    Turnstile widget container, or a challenge title instead. Returns a short
+    reason string, or '' when no such signal is present.
+    """
+    try:
+        signal = engine.evaluate(tab, r"""
+            (() => {
+              const title = (document.title || '').toLowerCase();
+              if (/just a moment|attention required|verifying you are|access denied/.test(title)) {
+                return 'title:' + title.slice(0, 40);
+              }
+              const iframe = document.querySelector(
+                'iframe[src*="challenges.cloudflare.com"], iframe[src*="/cdn-cgi/challenge"], iframe[title*="challenge" i]'
+              );
+              if (iframe) return 'cf-challenge-iframe';
+              if (document.querySelector('.cf-turnstile, #cf-chl-widget, #challenge-form, #challenge-stage, #turnstile-wrapper')) {
+                return 'cf-challenge-widget';
+              }
+              return '';
+            })()
+        """)
+        return str(signal or "").strip()
+    except Exception:
+        return ""
+
+
 def _page_response_status(engine, tab) -> int | None:
     try:
         status = engine.evaluate(tab, """
@@ -3545,6 +3576,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     playbook_attempted: set[str] = set()
     wayback_redirects_followed: set[str] = set()
     wayback_redirect_hops = 0
+    consecutive_waits = 0
     forced_context_scrolls = 0
 
     def mark_playbook_attempt(current_url: str, current_knowledge: dict) -> None:
@@ -3589,7 +3621,10 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 last_host = host
                 last_dom = extraction_text or dom
                 response_status = _page_response_status(engine, tab)
-                verification_reason = _transient_verification_reason(dom, response_status)
+                verification_reason = (
+                    _transient_verification_reason(dom, response_status)
+                    or _dom_verification_signal(engine, tab)
+                )
                 down_reason = _content_down_reason(dom, response_status)
                 if _is_wayback_url(url) and not verification_reason and wayback_redirect_hops < 4:
                     redirect_target = _wayback_redirect_target(engine, tab, url)
@@ -3910,6 +3945,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 _persist_agent_result(last_url or url, "failed", error=message,
                                       error_detail=response, source_link=source_link)
                 return
+
+            consecutive_waits = consecutive_waits + 1 if action["action"] == "wait" else 0
 
             if action["action"] == "done":
                 answer = _clean_final_summary(action.get("answer", response))
@@ -4518,6 +4555,48 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         )
                         return
                     verification_waits[verify_key] = wait_count + 1
+                elif consecutive_waits >= 3 and not _is_wayback_url(last_url or url):
+                    # Anti-stall: never wait forever. Repeated no-progress waits
+                    # (e.g. an undetected verification wall) escalate to a click,
+                    # then fail with a clear reason instead of looping to timeout.
+                    verify_key = last_url or url or initial_url
+                    click_count = verification_clicks.get(verify_key, 0)
+                    if click_count < 2:
+                        verification_clicks[verify_key] = click_count + 1
+                        STATE.update(note="page stalled on repeated waits; attempting verification click")
+                        STATE.push_trace({
+                            "ts": _now(),
+                            "message": "stalled on repeated waits; attempting verification click",
+                            "step": step_no,
+                            "waits": consecutive_waits,
+                            "attempt": click_count + 1,
+                            "url": verify_key,
+                        })
+                        if _try_verification_click(engine, tab, step_no=step_no):
+                            _job_sleep(8, deadline)
+                        else:
+                            _job_sleep(3, deadline)
+                        consecutive_waits = 0
+                        continue
+                    message = (
+                        "Page did not progress after repeated waits; likely an unsolved "
+                        "verification or load wall."
+                    )
+                    STATE.push_trace({
+                        "ts": _now(),
+                        "message": "giving up after stalled waits",
+                        "step": step_no,
+                        "waits": consecutive_waits,
+                        "url": verify_key,
+                    })
+                    STATE.update(error=message, status="error")
+                    _persist_agent_result(last_url or url, "failed", error=message,
+                                          source_link=source_link)
+                    _auto_learn_domain(
+                        brain, last_host, last_url, "agent-stalled-waits",
+                        STATE.current.trace, error=message,
+                    )
+                    return
                 STATE.push_trace({
                     "ts": _now(),
                     "message": "waiting",
