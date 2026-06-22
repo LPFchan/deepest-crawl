@@ -895,7 +895,7 @@ def _ensure_engine(timeout_seconds: float | None = None):
 
 
 def _reconnect_engine(timeout_seconds: float | None = None):
-    global _engine_ready, _engine_timeout
+    global _engine_ready, _engine_timeout, _SCREENSHOT_TAB
     try:
         if _engine_ready is not None:
             _engine_ready.close()
@@ -903,6 +903,7 @@ def _reconnect_engine(timeout_seconds: float | None = None):
         pass
     _engine_ready = None
     _engine_timeout = None
+    _SCREENSHOT_TAB = None
     return _ensure_engine(timeout_seconds)
 
 
@@ -927,6 +928,7 @@ def _is_tab_session_error(exc: Exception) -> bool:
         "not part of browser session" in message
         or "No tab with id" in message
         or "Debugger unattached" in message
+        or "unexpected response id" in message
     )
 
 

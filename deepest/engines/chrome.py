@@ -46,6 +46,7 @@ class RealChromeEngine(BrowserEngine):
     """Single engine — your real Chrome via the OBU extension transport."""
 
     name = "chrome"
+    _GLOBAL_LOCK = threading.RLock()
 
     def __init__(self, session_id: str | None = None, socket_path: str | None = None,
                  timeout: float = 30.0):
@@ -53,17 +54,18 @@ class RealChromeEngine(BrowserEngine):
         self._socket_path = socket_path
         self._timeout = timeout
         self._client = None
-        self._lock = threading.RLock()
+        self._lock = self._GLOBAL_LOCK
 
     # ---- lifecycle ----
     def connect(self) -> "RealChromeEngine":
         from open_browser_use.client import OpenBrowserUseClient  # type: ignore
         from ..bh import _ipc as bh_ipc  # bind BH's verbatim helpers to this engine
-        sock = self._socket_path or discover_socket()
-        self._client = OpenBrowserUseClient(
-            socket_path=sock, session_id=self.session_id, timeout=self._timeout,
-        ).connect()
-        bh_ipc.bind(self)
+        with self._lock:
+            sock = self._socket_path or discover_socket()
+            self._client = OpenBrowserUseClient(
+                socket_path=sock, session_id=self.session_id, timeout=self._timeout,
+            ).connect()
+            bh_ipc.bind(self)
         return self
 
     def activate(self, tab: TabHandle):
@@ -89,6 +91,17 @@ class RealChromeEngine(BrowserEngine):
         if self._client is None:
             self.connect()
         return self._client
+
+    @staticmethod
+    def _is_transport_desync(exc: Exception) -> bool:
+        return "unexpected response id" in f"{type(exc).__name__}: {exc}"
+
+    def _reset_client_locked(self) -> None:
+        if self._client is not None:
+            try:
+                self._client.close()
+            finally:
+                self._client = None
 
     # ---- tabs ----
     def new_tab(self, url: str | None = None) -> TabHandle:
@@ -128,7 +141,13 @@ class RealChromeEngine(BrowserEngine):
     # ---- the one seam ----
     def cdp(self, tab: TabHandle, method: str, params: dict | None = None) -> dict:
         with self._lock:
-            return self._c().execute_cdp(tab.id, method, params or {})
+            try:
+                return self._c().execute_cdp(tab.id, method, params or {})
+            except RuntimeError as exc:
+                if not self._is_transport_desync(exc):
+                    raise
+                self._reset_client_locked()
+                return self._c().execute_cdp(tab.id, method, params or {})
 
     def finalize(self, keep: list[dict] | None = None) -> None:
         with self._lock:
