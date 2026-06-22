@@ -88,6 +88,12 @@ def _crawl_timeout_seconds(value: float | None = None) -> float:
     return value if value and value > 0 else _env_float("DEEPEST_CRAWL_TIMEOUT_SECONDS", 300.0)
 
 
+def _chrome_command_timeout_seconds(value: float | None = None) -> float:
+    crawl_timeout = _crawl_timeout_seconds(value)
+    chrome_timeout = _env_float("DEEPEST_CHROME_COMMAND_TIMEOUT_SECONDS", 20.0)
+    return max(1.0, min(crawl_timeout, chrome_timeout))
+
+
 def _job_deadline(timeout_seconds: float | None = None) -> float:
     return time.monotonic() + _crawl_timeout_seconds(timeout_seconds)
 
@@ -714,7 +720,7 @@ def _call_brain_with_retry(operation, deadline: float, timeout_seconds: float, l
 
 def _ensure_engine(timeout_seconds: float | None = None):
     global _engine_ready, _engine_timeout
-    timeout = _crawl_timeout_seconds(timeout_seconds)
+    timeout = _chrome_command_timeout_seconds(timeout_seconds)
     if _engine_ready is not None and _engine_timeout != timeout:
         try:
             _engine_ready.close()

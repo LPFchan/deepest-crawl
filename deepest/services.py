@@ -27,6 +27,12 @@ DEFAULT_LOG_DIR = ROOT / "outputs" / "logs"
 _BRAIN_PROC: subprocess.Popen | None = None
 _BRAIN_LOG_HANDLE = None
 _CHROME_PROC: subprocess.Popen | None = None
+_CHROME_STATUS_CACHE = {
+    "checked_at": 0.0,
+    "ready": False,
+    "error": "",
+    "registry": None,
+}
 
 
 KNOWN_BRAIN_MODELS = [
@@ -84,6 +90,70 @@ def _brain_exit_code() -> int | None:
     if _BRAIN_PROC is None:
         return None
     return _BRAIN_PROC.poll()
+
+
+def _chrome_probe_timeout() -> float:
+    try:
+        return max(0.5, float(os.environ.get("DEEPEST_CHROME_PROBE_TIMEOUT", "2.5")))
+    except ValueError:
+        return 2.5
+
+
+def _read_chrome_registry() -> tuple[dict | None, str]:
+    if not ACTIVE_REGISTRY.exists():
+        return None, "Open Browser Use active registry is missing."
+    try:
+        registry = json.loads(ACTIVE_REGISTRY.read_text())
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if not isinstance(registry, dict):
+        return None, "Open Browser Use active registry is not a JSON object."
+    socket_path = registry.get("socketPath")
+    if not socket_path:
+        return registry, "Open Browser Use active registry has no socketPath."
+    if not Path(str(socket_path)).exists():
+        return registry, f"Open Browser Use socket is missing: {socket_path}"
+    return registry, ""
+
+
+def _probe_chrome_transport(registry: dict, timeout: float) -> tuple[bool, str]:
+    socket_path = str(registry.get("socketPath") or "")
+    try:
+        from open_browser_use.client import OpenBrowserUseClient  # type: ignore
+        client = OpenBrowserUseClient(
+            socket_path=socket_path,
+            session_id=f"deepest-health-{int(time.time() * 1000)}",
+            timeout=timeout,
+        ).connect()
+        try:
+            client.get_tabs()
+        finally:
+            client.close()
+        return True, ""
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def chrome_transport_status(*, ttl_seconds: float = 2.0, timeout: float | None = None) -> dict:
+    now = time.time()
+    cached = _CHROME_STATUS_CACHE
+    if ttl_seconds > 0 and now - float(cached["checked_at"]) < ttl_seconds:
+        return dict(cached)
+
+    registry, registry_error = _read_chrome_registry()
+    ready = False
+    error = registry_error
+    if registry is not None and not registry_error:
+        ready, probe_error = _probe_chrome_transport(registry, timeout or _chrome_probe_timeout())
+        error = probe_error
+
+    cached.update({
+        "checked_at": now,
+        "ready": ready,
+        "error": error,
+        "registry": registry,
+    })
+    return dict(cached)
 
 
 def _available_brain_models() -> list[dict]:
@@ -209,13 +279,8 @@ def _brain_failure_message(prefix: str, model: str) -> str:
 def status() -> dict:
     from . import brain
 
-    registry = None
-    registry_error = ""
-    if ACTIVE_REGISTRY.exists():
-        try:
-            registry = json.loads(ACTIVE_REGISTRY.read_text())
-        except Exception as e:
-            registry_error = f"{type(e).__name__}: {e}"
+    chrome_status = chrome_transport_status()
+    registry = chrome_status.get("registry")
 
     log_path = _brain_log_path()
     exit_code = _brain_exit_code()
@@ -239,10 +304,10 @@ def status() -> dict:
             "available_models": _available_brain_models(),
         },
         "chrome": {
-            "ready": ACTIVE_REGISTRY.exists(),
+            "ready": bool(chrome_status.get("ready")),
             "registry": str(ACTIVE_REGISTRY),
             "socket_path": registry.get("socketPath") if isinstance(registry, dict) else None,
-            "registry_error": registry_error,
+            "registry_error": chrome_status.get("error", ""),
             "autostart": _enabled("DEEPEST_CHROME_AUTOSTART"),
         },
     }
@@ -350,24 +415,30 @@ def launch_chrome(status=None) -> None:
 
 def ensure_chrome_transport(status=None) -> Path:
     """Return the OBU active registry after verifying or launching Chrome."""
-    if ACTIVE_REGISTRY.exists():
+    chrome_status = chrome_transport_status(ttl_seconds=0)
+    if chrome_status.get("ready"):
         return ACTIVE_REGISTRY
     if not _enabled("DEEPEST_CHROME_AUTOSTART"):
-        raise RuntimeError("Chrome OBU transport is not active and autostart is disabled.")
+        error = chrome_status.get("error") or "Chrome OBU transport is not active."
+        raise RuntimeError(f"{error} Chrome autostart is disabled.")
 
+    if status and chrome_status.get("error"):
+        status(f"Chrome OBU transport not ready: {chrome_status['error']}")
     launch_chrome(status=status)
     wait_s = float(os.environ.get("DEEPEST_CHROME_WAIT", "60"))
     deadline = time.time() + wait_s
     while time.time() < deadline:
-        if ACTIVE_REGISTRY.exists():
+        chrome_status = chrome_transport_status(ttl_seconds=0)
+        if chrome_status.get("ready"):
             if status:
                 status("Chrome OBU transport ready")
             return ACTIVE_REGISTRY
         time.sleep(1)
 
+    error = chrome_status.get("error") or "transport probe did not become ready"
     raise RuntimeError(
         "Chrome launched, but the Open Browser Use transport did not become active. "
-        "Make sure the Open Browser Use extension and native host are installed and enabled."
+        f"{error}. Make sure the Open Browser Use extension and native host are installed and enabled."
     )
 
 
