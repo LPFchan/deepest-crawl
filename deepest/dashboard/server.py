@@ -214,6 +214,10 @@ def _content_down_reason(text: str, status: int | None = None) -> str:
     return ""
 
 
+def _content_down_failure_message(url: str, reason: str) -> str:
+    return f"Content unavailable ({reason}) at {url}."
+
+
 def _transient_verification_reason(text: str, status: int | None = None) -> str:
     sample = " ".join((text or "").lower().split())[:4000]
     if not sample:
@@ -1129,6 +1133,15 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                 STATE.update(url=url, host=_host_of(url))
                 p = perceive(engine, tab, url)
                 _publish_screenshot(engine, tab, "internet archive browser screenshot")
+                response_status = _page_response_status(engine, tab)
+                down_reason = _content_down_reason(p.text or "", response_status)
+        if down_reason and _is_wayback_url(current_url if not _is_wayback_url(url) else url):
+            failed_url = url if _is_wayback_url(url) else current_url
+            message = _content_down_failure_message(failed_url, down_reason)
+            _trace("archived page unavailable", reason=down_reason, url=failed_url)
+            STATE.update(error=message, status="error")
+            _persist_result(_result_from_state(link, "failed", error=message))
+            return
         if _should_agentic_fallback(link, p, knowledge):
             STATE.push_trace({
                 "ts": _now(),
@@ -1177,6 +1190,15 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
             if not (p.text or "").strip():
                 raise
             message = f"{type(brain_exc).__name__}: {brain_exc}"
+            down_reason = _content_down_reason(p.text or "", _page_response_status(engine, tab))
+            if down_reason:
+                failure = _content_down_failure_message(url, down_reason)
+                _trace("captured content is unavailable page", reason=down_reason, error=message)
+                STATE.update(error=failure, error_detail=message, status="error")
+                _persist_result(_result_from_state(
+                    link, "failed", error=failure, error_detail=message,
+                ))
+                return
             STATE.push_trace({
                 "ts": _now(),
                 "message": "brain summary failed; using captured DOM text",
@@ -2689,6 +2711,19 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
                         _job_sleep(1, deadline)
                         continue
+                if down_reason and not verification_reason and url and _is_wayback_url(url):
+                    message = _content_down_failure_message(url, down_reason)
+                    STATE.push_trace({
+                        "ts": _now(),
+                        "message": "archived page unavailable",
+                        "step": step_no,
+                        "reason": down_reason,
+                        "url": url,
+                    })
+                    STATE.update(error=message, status="error")
+                    _persist_agent_result(url, "failed", error=message,
+                                          source_link=source_link)
+                    return
             except Exception:
                 STATE.update(note=f"step {step_no} — CDP disconnected, reconnecting...")
                 STATE.push_trace({
@@ -2799,6 +2834,20 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 fallback_text = _best_text_for_extraction(obs, dom)
                 if _is_brain_failure(brain_exc) and fallback_text.strip():
                     message = f"{type(brain_exc).__name__}: {brain_exc}"
+                    down_reason = _content_down_reason(fallback_text, response_status)
+                    if down_reason:
+                        failure = _content_down_failure_message(url or last_url, down_reason)
+                        STATE.push_trace({
+                            "ts": _now(),
+                            "message": "captured content is unavailable page",
+                            "step": step_no,
+                            "reason": down_reason,
+                            "error": message,
+                        })
+                        STATE.update(error=failure, error_detail=message, status="error")
+                        _persist_agent_result(url or last_url, "failed", error=failure,
+                                              error_detail=message, source_link=source_link)
+                        return
                     summary = _fallback_summary(url or last_url, fallback_text, message)
                     STATE.push_trace({
                         "ts": _now(),
