@@ -1612,6 +1612,7 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
     )
     tab = None
     brain = None
+    needs_reconnect = False
     try:
         _check_job_open(deadline)
         _trace("connecting to real Chrome transport")
@@ -1798,10 +1799,26 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                                            error_detail=detail))
         _append_domain_note(host, "crawl-error", message, url, STATE.current.trace)
         _auto_learn_domain(brain, host, url, "failed", STATE.current.trace, error=message)
+        needs_reconnect = _is_tab_session_error(e)
     finally:
         if tab is not None:
             _close_job_tab(engine, tab, reason="crawl job finished")
         _set_active_tab()
+        if needs_reconnect:
+            # The shared Chrome debugger session detached; reconnect the transport
+            # so the next URL in a bulk run does not inherit the dead session.
+            try:
+                _reconnect_engine()
+                STATE.push_trace({
+                    "ts": _now(),
+                    "message": "reconnected Chrome transport after tab-session error",
+                })
+            except Exception as reconnect_exc:
+                STATE.push_trace({
+                    "ts": _now(),
+                    "message": "Chrome transport reconnect failed",
+                    "error": f"{type(reconnect_exc).__name__}: {reconnect_exc}",
+                })
 
 
 def _do_prompt(text: str):
@@ -3550,6 +3567,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     )
     tab = None
     brain = None
+    needs_reconnect = False
     last_url = ""
     last_host = ""
     last_dom = ""
@@ -4729,10 +4747,26 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                               source_link=source_link)
         _auto_learn_domain(brain, last_host, last_url, "agent-error",
                            STATE.current.trace, error=message)
+        needs_reconnect = _is_tab_session_error(e)
     finally:
         if tab is not None:
             _close_job_tab(engine, tab, reason="agent job finished")
         _set_active_tab()
+        if needs_reconnect:
+            # The shared Chrome debugger session detached; reconnect so the next
+            # URL in a bulk run does not inherit the dead session.
+            try:
+                _reconnect_engine()
+                STATE.push_trace({
+                    "ts": _now(),
+                    "message": "reconnected Chrome transport after tab-session error",
+                })
+            except Exception as reconnect_exc:
+                STATE.push_trace({
+                    "ts": _now(),
+                    "message": "Chrome transport reconnect failed",
+                    "error": f"{type(reconnect_exc).__name__}: {reconnect_exc}",
+                })
 
 
 def _run_agentic_job(instruction: str, initial_url: str = "", timeout_seconds: float | None = None) -> None:
