@@ -1071,6 +1071,43 @@ def _wait_for_load_with_tab_recovery(engine, tab, url: str, timeout_seconds: flo
         return engine, tab, bh
 
 
+def _perceive_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
+                                deadline: float, *, reason: str,
+                                step_no: int | None = None):
+    """Perceive the page, recovering when the tab session detaches.
+
+    Freshly opened tabs and redirecting short links (e.g. spotify.link) can
+    momentarily report 'Debugger unattached' because the CDP session is still
+    attached to the pre-redirect target. Reclaim the tab and re-settle the load
+    before retrying so a transient detach does not fail the whole crawl.
+    """
+    from ..perception.policy import perceive
+    try:
+        return engine, tab, perceive(engine, tab, url)
+    except Exception as exc:
+        if not _is_tab_session_error(exc):
+            raise
+        trace = {
+            "ts": _now(),
+            "message": "tab detached during perception; reconnecting",
+            "reason": reason,
+            "tab": getattr(tab, "id", ""),
+            "url": url,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if step_no is not None:
+            trace["step"] = step_no
+        STATE.push_trace(trace)
+    engine, tab = _navigate_with_tab_recovery(
+        engine, tab, url, timeout_seconds, deadline, reason=reason, step_no=step_no,
+    )
+    engine, tab, _bh = _wait_for_load_with_tab_recovery(
+        engine, tab, url, timeout_seconds, deadline, reason=reason, step_no=step_no,
+    )
+    _set_active_tab(engine, tab)
+    return engine, tab, perceive(engine, tab, url)
+
+
 def _serialize(step: CrawlStep) -> dict:
     d = {
         "id": step.id,
@@ -1408,10 +1445,12 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
         _job_sleep(2, deadline)
         _publish_screenshot(engine, tab, "initial browser screenshot")
 
-        from ..perception.policy import perceive
         _check_job_open(deadline)
         _trace("perceiving page")
-        p = perceive(engine, tab, url)
+        engine, tab, p = _perceive_with_tab_recovery(
+            engine, tab, url, timeout, deadline, reason="initial perception",
+        )
+        _set_active_tab(engine, tab)
         current_url = engine.current_url(tab) or url
         STATE.update(url=current_url, host=_host_of(current_url))
         _publish_screenshot(engine, tab, "post-perception browser screenshot")
@@ -1469,7 +1508,9 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                 _job_sleep(1, deadline)
                 url = engine.current_url(tab) or archive_url
                 STATE.update(url=url, host=_host_of(url))
-                p = perceive(engine, tab, url)
+                engine, tab, p = _perceive_with_tab_recovery(
+                    engine, tab, url, timeout, deadline, reason="direct archive fallback",
+                )
                 _publish_screenshot(engine, tab, "internet archive browser screenshot")
                 response_status = _page_response_status(engine, tab)
                 down_reason = _content_down_reason(p.text or "", response_status)
