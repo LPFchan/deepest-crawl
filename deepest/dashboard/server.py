@@ -92,15 +92,15 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _agent_brain_max_chars() -> int:
-    return _env_int("DEEPEST_AGENT_BRAIN_MAX_CHARS", 9000)
+    return _env_int("DEEPEST_AGENT_BRAIN_MAX_CHARS", 18000)
 
 
 def _agent_brain_max_tokens() -> int:
-    return _env_int("DEEPEST_AGENT_BRAIN_MAX_TOKENS", 384)
+    return _env_int("DEEPEST_AGENT_BRAIN_MAX_TOKENS", 768)
 
 
 def _agent_vision_max_tokens() -> int:
-    return _env_int("DEEPEST_AGENT_VISION_MAX_TOKENS", 256)
+    return _env_int("DEEPEST_AGENT_VISION_MAX_TOKENS", 768)
 
 
 def _crawl_timeout_seconds(value: float | None = None) -> float:
@@ -1263,8 +1263,8 @@ def _do_prompt(text: str):
         response = brain.summarize_text(
             "prompt",
             text,
-            max_chars=_agent_brain_max_chars(),
-            max_tokens=_agent_brain_max_tokens(),
+            max_chars=_env_int("DEEPEST_PROMPT_MAX_CHARS", 10000),
+            max_tokens=_env_int("DEEPEST_PROMPT_MAX_TOKENS", 1024),
         )
         STATE.update(response=response, status="done")
     except Exception as e:

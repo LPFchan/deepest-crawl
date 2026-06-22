@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 MIN_TEXT_CHARS = 200
-VISION_MAX_DIM = int(os.environ.get("DEEPEST_VISION_MAX_DIM", "512"))
+VISION_MAX_DIM = int(os.environ.get("DEEPEST_VISION_MAX_DIM", "640"))
 
 
 @dataclass

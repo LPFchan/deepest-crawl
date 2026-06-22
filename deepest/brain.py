@@ -89,7 +89,7 @@ def _post(payload: dict, timeout: float) -> str:
 
 def complete(system: str, user: str, max_tokens: int | None = None,
              temperature: float = 0.2, timeout: float = 180.0) -> str:
-    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_MAX_TOKENS", 384)
+    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_MAX_TOKENS", 512)
     return _post({
         "model": current_model(),
         "messages": [
@@ -108,7 +108,7 @@ def complete_with_image(system: str, user: str, png_bytes: bytes,
         raise RuntimeError(
             f"complete_with_image called but DEEPEST_BRAIN_VISION=0 "
             f"(model has no vision tower).")
-    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_VISION_MAX_TOKENS", 256)
+    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_VISION_MAX_TOKENS", 512)
     b64 = base64.b64encode(png_bytes).decode()
     data_uri = f"data:image/png;base64,{b64}"
     return _post({
@@ -127,8 +127,8 @@ def complete_with_image(system: str, user: str, png_bytes: bytes,
 
 def summarize_text(url: str, text: str, max_chars: int | None = None,
                    max_tokens: int | None = None, timeout: float = 180.0) -> str:
-    max_chars = max_chars or _env_int("DEEPEST_BRAIN_MAX_CHARS", 9000)
-    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_MAX_TOKENS", 384)
+    max_chars = max_chars or _env_int("DEEPEST_BRAIN_MAX_CHARS", 12000)
+    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_MAX_TOKENS", 512)
     text = (text or "").strip()[:max_chars]
     user = f"URL: {url}\n\n--- PAGE TEXT ---\n{text}"
     return complete(SYSTEM, user, max_tokens=max_tokens, temperature=0.2,
@@ -141,7 +141,7 @@ def summarize_image(url: str, png_bytes: bytes,
         raise RuntimeError(
             f"summarize_image called but DEEPEST_BRAIN_VISION=0 (model "
             f"has no vision tower). URL: {url}")
-    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_VISION_MAX_TOKENS", 256)
+    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_VISION_MAX_TOKENS", 512)
     b64 = base64.b64encode(png_bytes).decode()
     data_uri = f"data:image/png;base64,{b64}"
     user = [
@@ -176,7 +176,7 @@ EXTRACTOR_SYSTEM = (
 
 def generate_extractor(url: str, host: str, html_excerpt: str, reference: str = "",
                        max_tokens: int | None = None, timeout: float = 180.0) -> str:
-    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_EXTRACTOR_MAX_TOKENS", 384)
+    max_tokens = max_tokens or _env_int("DEEPEST_BRAIN_EXTRACTOR_MAX_TOKENS", 700)
     ref_block = f"\n\n--- BROWSER-HARNESS EXPERTISE FOR THIS SITE ---\n{reference}" if reference else ""
     user = (f"host: {host}\nurl: {url}{ref_block}\n\n--- HTML EXCERPT ---\n"
             f"{html_excerpt[:16000]}")

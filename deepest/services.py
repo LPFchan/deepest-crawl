@@ -279,10 +279,10 @@ def _brain_failure_message(prefix: str, model: str) -> str:
 def _mlx_server_args() -> list[str]:
     args: list[str] = []
     options = [
-        ("DEEPEST_MLX_VISION_CACHE_SIZE", "--vision-cache-size", "1"),
-        ("DEEPEST_MLX_PREFILL_STEP_SIZE", "--prefill-step-size", "512"),
-        ("DEEPEST_MLX_MAX_TOKENS", "--max-tokens", "384"),
-        ("DEEPEST_MLX_MAX_KV_SIZE", "--max-kv-size", "4096"),
+        ("DEEPEST_MLX_VISION_CACHE_SIZE", "--vision-cache-size", ""),
+        ("DEEPEST_MLX_PREFILL_STEP_SIZE", "--prefill-step-size", ""),
+        ("DEEPEST_MLX_MAX_TOKENS", "--max-tokens", ""),
+        ("DEEPEST_MLX_MAX_KV_SIZE", "--max-kv-size", ""),
         ("DEEPEST_MLX_KV_BITS", "--kv-bits", ""),
     ]
     for env_name, flag, default in options:
