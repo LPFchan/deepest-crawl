@@ -2003,7 +2003,10 @@ AGENT_SYSTEM = (
     "'landed on the page', 'fully loaded', or 'no need for further navigation'. Explain vague "
     "references with concrete details; for example, if there is 'confusion', explain what caused it. "
     "Do not mention generic site chrome such as navigation links, social media links, search bars, "
-    "menus, sidebars, footers, or extraction internals such as 'Extracted main content'.\n"
+    "menus, sidebars, footers, copyright or legal notices, sign-in/login/subscription gating "
+    "(for example 'requires sign-in to view lyrics'), or recommendation modules such as "
+    "recommended, related, popular, or 'fans also like' items, "
+    "or extraction internals such as 'Extracted main content'.\n"
     "Do not invent or call tools/functions outside the formats listed above.\n\n"
     "For visual security pages that require typing, click the field first if needed, "
     "then use type|text|... for the focused field and press|Enter to submit. "
@@ -2089,6 +2092,34 @@ def _clean_final_summary(text: str) -> str:
         "extracted and summarized",
         "browser viewport",
         "visible viewport",
+        "page footer",
+        "site footer",
+        "in the footer",
+        "copyright information",
+        "copyright notice",
+        "all rights reserved",
+        "©",
+        "requires sign-in",
+        "requires sign in",
+        "requires a sign",
+        "sign in to",
+        "sign-in to",
+        "log in to",
+        "requires a subscription",
+        "requires login",
+        "to listen to the full",
+        "to view the lyrics",
+        "to view lyrics",
+        "recommended track",
+        "recommended release",
+        "recommended for you",
+        "related track",
+        "related release",
+        "popular release",
+        "popular track",
+        "you might also",
+        "more like this",
+        "fans also",
     )
     kept = [
         sentence.strip()
@@ -2352,7 +2383,10 @@ def _extraction_summary_prompt(instruction: str, url: str, obs: dict,
     return (
         "Summarize the crawled page from extracted page content. Be faithful, "
         "specific, and detailed. Do not discuss browser status, navigation menus, "
-        "social links, search bars, sidebars, footers, whether the page is loaded, "
+        "social links, search bars, sidebars, footers, copyright or legal notices, "
+        "sign-in/login/subscription gating (for example 'requires sign-in to view "
+        "lyrics'), recommendation modules such as recommended, related, popular, or "
+        "'fans also like' items, whether the page is loaded, "
         "or whether more navigation is needed. Never mention extraction internals like "
         "'Extracted main content' or that content was extracted/summarized. "
         "Explain vague references such as 'confusion' by stating the concrete cause. "
@@ -2380,11 +2414,17 @@ def _summary_verifier_prompt(instruction: str, url: str, obs: dict,
         "summary is faithful and sufficiently specific for the user's crawl request.\n\n"
         "Accept concise summaries when they cover the central facts, concrete cause, "
         "important numbers/specs/names, and outcome. Do not reject only because the "
-        "summary is shorter than the source. Decline if it is mostly browser status, "
+        "summary is shorter than the source. Extracted content may be sparse or empty "
+        "for sign-in-walled or script-heavy pages; in that case judge faithfulness "
+        "against the visible viewport text and the candidate itself, and do not decline "
+        "solely because the extracted content is short or empty. Decline if it is mostly browser status, "
         "navigation chrome, vague paraphrase, missing the cause of the article, or "
         "contradicts the extracted content. Decline if it mentions generic page chrome "
         "such as navigation links, social media links, search bars, menus, sidebars, "
-        "footers, or extraction internals such as 'Extracted main content'. Decline "
+        "footers, copyright or legal notices, sign-in/login/subscription gating "
+        "(for example 'requires sign-in to view lyrics'), recommendation modules such "
+        "as recommended, related, popular, or 'fans also like' items, "
+        "or extraction internals such as 'Extracted main content'. Decline "
         "if it merely says the page is empty, blank, unavailable, or has no visible "
         "content; that is a crawl failure or archive-search task, not a successful "
         "page summary.\n\n"
@@ -2431,8 +2471,6 @@ def _verify_summary_candidate(brain, instruction: str, url: str, obs: dict,
             "reason": f"candidate reports unavailable content: {unavailable_reason}",
             "raw": candidate,
         }
-    if _word_count(content) < 80:
-        return None
     try:
         response = _call_brain_with_retry(
             lambda call_timeout: brain.summarize_text(
