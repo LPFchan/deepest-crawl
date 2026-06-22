@@ -73,6 +73,20 @@ function renderQueueControls() {
   btn.classList.toggle("accent", q.paused);
 }
 
+function applyTheme(theme) {
+  const t = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = t;
+  const btn = $("theme-toggle");
+  if (btn) btn.textContent = t === "dark" ? "☀ Light" : "☾ Dark";
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  const next = cur === "dark" ? "light" : "dark";
+  try { localStorage.setItem("deepest:theme", next); } catch (e) {}
+  applyTheme(next);
+}
+
 async function togglePause() {
   const paused = !!(state.queue && state.queue.paused);
   try {
@@ -171,7 +185,9 @@ function setStatus(status, detail) {
 }
 
 function setProgress(progress) {
-  $("progress-text").textContent = `${progress?.done || 0} / ${progress?.total || 0}`;
+  const total = progress?.total || 0;
+  // Only show progress while a job is active; "0 / 0" at idle is noise.
+  $("progress-text").textContent = total ? `${progress?.done || 0} / ${total}` : "";
 }
 
 function setMode(mode) {
@@ -772,10 +788,14 @@ async function loadServices() {
     state.chromeReady = Boolean(data.chrome?.ready);
     if (state.chromeReady) showScreenshot();
     const startup = data.startup || {};
+    const startBtn = $("start-services-btn");
     if (startup.status === "starting" || startup.status === "busy") {
-      setBusy($("start-services-btn"), true, "Starting");
+      setBusy(startBtn, true, "Start");
+      startBtn.hidden = false;
     } else {
-      setBusy($("start-services-btn"), false, "Start Services");
+      setBusy(startBtn, false, "Start");
+      // Contextual: hide Start when both services are already up (no dead chrome).
+      startBtn.hidden = Boolean(data.brain?.ready && data.chrome?.ready);
     }
     if (startup.error && startup.error !== state.lastError) {
       state.lastError = startup.error;
@@ -785,6 +805,7 @@ async function loadServices() {
     state.chromeReady = false;
     setServiceChip("brain-chip", "Brain", false, String(err));
     setServiceChip("chrome-chip", "Chrome", false, String(err));
+    $("start-services-btn").hidden = false;
     const detail = $("service-detail");
     if (detail) {
       detail.textContent = String(err);
@@ -812,7 +833,7 @@ async function startServices() {
     addMessage("tool", "Starting local MLX brain and Chrome transport");
   } catch (err) {
     addMessage("tool", String(err));
-    setBusy(btn, false, "Start Services");
+    setBusy(btn, false, "Start");
   } finally {
     setTimeout(loadServices, 1000);
   }
@@ -837,7 +858,7 @@ async function configureBrainModel() {
     addMessage("tool", String(err));
     await loadServices();
   } finally {
-    setBusy($("start-services-btn"), false, "Start Services");
+    setBusy($("start-services-btn"), false, "Start");
   }
 }
 
@@ -1105,7 +1126,8 @@ function updateState(data) {
 
 function connectEvents() {
   const es = new EventSource(EVENTS_URL);
-  $("conn-status").textContent = "connected";
+  // Empty when healthy (hidden via :empty); only surfaces on trouble.
+  $("conn-status").textContent = "";
 
   es.onmessage = (event) => {
     try {
@@ -1177,6 +1199,8 @@ function bindEvents() {
   $("crawl-all-btn").addEventListener("click", crawlAll);
   $("stop-job-btn").addEventListener("click", cancelJob);
   $("pause-btn").addEventListener("click", togglePause);
+  $("theme-toggle").addEventListener("click", toggleTheme);
+  applyTheme(document.documentElement.dataset.theme);
   $("start-services-btn").addEventListener("click", startServices);
   $("brain-model-select").addEventListener("change", configureBrainModel);
   $("reason-filter").addEventListener("change", () => {

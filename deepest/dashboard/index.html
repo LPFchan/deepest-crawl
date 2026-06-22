@@ -5,20 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>deepest-crawl</title>
   <link rel="stylesheet" href="/app.css">
+  <script>
+    // Set theme before first paint to avoid a flash: stored choice, else OS preference.
+    (function () {
+      try {
+        var t = localStorage.getItem("deepest:theme");
+        if (t !== "dark" && t !== "light") {
+          t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">DC</div>
-        <div>
-          <h1>deepest-crawl</h1>
-          <div class="status-line">
-            <span class="dot idle" id="status-dot"></span>
-            <span id="status-text">idle</span>
-            <span id="progress-text">0 / 0</span>
-            <span id="conn-status">disconnected</span>
-          </div>
+        <h1>deepest-crawl</h1>
+        <div class="status-line">
+          <span class="dot idle" id="status-dot"></span>
+          <span id="status-text">idle</span>
+          <span id="progress-text"></span>
+          <span id="conn-status"></span>
         </div>
       </div>
       <form class="url-form" id="crawl-form">
@@ -26,12 +35,13 @@
         <button type="submit" id="crawl-btn">Crawl</button>
       </form>
       <div class="service-strip">
-        <select id="brain-model-select" aria-label="Brain model">
+        <span class="service-chip" id="brain-chip">Brain</span>
+        <span class="service-chip" id="chrome-chip">Chrome</span>
+        <select id="brain-model-select" class="model-select" aria-label="Brain model">
           <option value="">Brain model</option>
         </select>
-        <span class="service-chip" id="brain-chip">Brain: checking</span>
-        <span class="service-chip" id="chrome-chip">Chrome: checking</span>
-        <button class="secondary" id="start-services-btn" type="button">Start Services</button>
+        <button class="secondary" id="start-services-btn" type="button">Start</button>
+        <button class="secondary icon-btn" id="theme-toggle" type="button" title="Toggle dark mode" aria-label="Toggle dark mode">☾</button>
         <div class="service-detail" id="service-detail"></div>
       </div>
     </header>

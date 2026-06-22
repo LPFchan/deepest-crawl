@@ -14,6 +14,35 @@
   --warning: #9a6700;
   --ok: #137333;
   --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  /* semantic tokens (theme-aware) */
+  --btn-bg: #18212f;
+  --btn-on: #ffffff;
+  --row-hover: #ffffff;
+  --selected-bg: #ecfdf5;
+  --queued-bg: #fffbeb;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-muted: #1c232d;
+  --line: #2a3340;
+  --line-strong: #3b4654;
+  --text: #e6edf3;
+  --muted: #9aa7b8;
+  --accent: #2dd4bf;
+  --accent-strong: #14b8a6;
+  --blue: #60a5fa;
+  --danger: #f87171;
+  --warning: #e0a82e;
+  --ok: #4ade80;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --btn-bg: #e6edf3;
+  --btn-on: #0d1117;
+  --row-hover: #1c232d;
+  --selected-bg: rgba(45, 212, 191, 0.13);
+  --queued-bg: rgba(180, 120, 9, 0.18);
 }
 
 * {
@@ -43,8 +72,8 @@ textarea {
 button {
   border: 1px solid transparent;
   border-radius: 6px;
-  background: var(--text);
-  color: #fff;
+  background: var(--btn-bg);
+  color: var(--btn-on);
   cursor: pointer;
   font-weight: 600;
   min-height: 34px;
@@ -81,7 +110,7 @@ textarea {
   width: 100%;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface);
   color: var(--text);
   outline: none;
 }
@@ -141,7 +170,7 @@ pre {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface-muted);
-  color: #293647;
+  color: var(--text);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.45;
@@ -156,7 +185,7 @@ pre {
 
 .topbar {
   display: grid;
-  grid-template-columns: minmax(230px, 280px) minmax(300px, 1fr) auto;
+  grid-template-columns: auto minmax(280px, 1fr) auto;
   align-items: center;
   gap: 14px;
   border-bottom: 1px solid var(--line);
@@ -166,21 +195,10 @@ pre {
 
 .brand {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 270px;
-}
-
-.brand-mark {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 800;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
 }
 
 .status-line {
@@ -189,8 +207,17 @@ pre {
   gap: 8px;
   color: var(--muted);
   font-size: 12px;
-  margin-top: 4px;
   white-space: nowrap;
+}
+
+#progress-text:empty,
+#conn-status:empty {
+  display: none;
+}
+
+#conn-status {
+  color: var(--warning);
+  font-weight: 700;
 }
 
 .dot {
@@ -221,18 +248,24 @@ pre {
 }
 
 .service-strip {
-  display: grid;
-  grid-template-columns: minmax(170px, 220px) auto auto 118px;
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: end;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.model-select {
+  max-width: 190px;
+}
+
+.icon-btn {
+  min-width: 34px;
+  padding: 0 9px;
 }
 
 .service-detail {
-  grid-column: 1 / -1;
-  justify-self: end;
-  max-width: 430px;
-  min-height: 14px;
+  flex-basis: 100%;
   overflow: hidden;
   color: var(--muted);
   font-size: 11px;
@@ -240,6 +273,10 @@ pre {
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.service-detail:empty {
+  display: none;
 }
 
 .service-chip {
@@ -420,7 +457,7 @@ pre {
 
 .link-row:hover {
   border-color: var(--line-strong);
-  background: #fff;
+  background: var(--row-hover);
 }
 
 .link-row.active {
@@ -430,13 +467,13 @@ pre {
 
 .link-row.selected {
   border-color: rgba(15, 118, 110, 0.62);
-  background: #ecfdf5;
+  background: var(--selected-bg);
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .link-row.queued {
   border-color: rgba(180, 83, 9, 0.4);
-  background: #fffbeb;
+  background: var(--queued-bg);
 }
 
 .link-row.active.selected {
@@ -586,7 +623,7 @@ pre {
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #eef2f7;
+  background: var(--surface-muted);
 }
 
 .browser-frame img {
@@ -746,13 +783,10 @@ pre {
   }
 
   .service-strip {
-    justify-content: stretch;
-    grid-template-columns: 1fr 1fr 1fr 130px;
+    justify-content: flex-start;
   }
 
   .service-detail {
-    justify-self: stretch;
-    max-width: none;
     text-align: left;
   }
 
