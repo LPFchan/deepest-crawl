@@ -230,6 +230,62 @@ def _normal_url_key(url: str) -> str:
     return (url or "").strip().rstrip("/").lower()
 
 
+_WAYBACK_JS_REDIRECT_RE = re.compile(
+    r"""(?:window\.)?(?:top\.|document\.)?location(?:\.href|\.assign|\.replace)?\s*"""
+    r"""(?:=|\()\s*["'](https?://[^"']*?/web/\d+[^"']*)["']""",
+    re.I,
+)
+_WAYBACK_META_REFRESH_RE = re.compile(
+    r"""<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["'][^"']*?url=([^"'>]+)""",
+    re.I,
+)
+_WAYBACK_INTERSTITIAL_RE = re.compile(
+    r"Got an HTTP\s+3\d\d\s+response at crawl time", re.I,
+)
+_WAYBACK_IMPATIENT_RE = re.compile(
+    r"""class=["']impatient["'][^>]*>\s*<a[^>]+href=["']([^"']+)["']""", re.I,
+)
+
+
+def _wayback_redirect_target(engine, tab, current_url: str) -> str:
+    """Return the archived snapshot a redirecting archived page points to.
+
+    Old domains commonly archive as a redirect to a successor domain — a server
+    301 captured as Wayback's 'Got an HTTP 3xx response at crawl time'
+    interstitial, a meta refresh, or a `window.location` JS redirect that Wayback
+    has already rewritten to a `/web/<ts>/<url>` target. We follow only redirects
+    that leave the current archived document's host, so same-page asset/self
+    references never trigger a hop. Empty string when there is no such redirect.
+    """
+    if not _is_wayback_url(current_url):
+        return ""
+    try:
+        html = engine.html(tab) or ""
+    except Exception:
+        return ""
+    if not html:
+        return ""
+    current_host = _host_of(_wayback_original_url(current_url))
+    candidates: list[str] = []
+    if _WAYBACK_INTERSTITIAL_RE.search(html):
+        impatient = _WAYBACK_IMPATIENT_RE.search(html)
+        if impatient:
+            candidates.append(impatient.group(1))
+    candidates.extend(_WAYBACK_JS_REDIRECT_RE.findall(html))
+    candidates.extend(_WAYBACK_META_REFRESH_RE.findall(html))
+    for raw in candidates:
+        target = (raw or "").strip()
+        if target.startswith("/web/"):
+            target = "https://web.archive.org" + target
+        if not _is_wayback_url(target):
+            continue
+        target_host = _host_of(_wayback_original_url(target))
+        if not target_host or target_host == current_host:
+            continue
+        return target
+    return ""
+
+
 def _wayback_snapshot_candidates(
     url: str,
     deadline: float | None = None,
@@ -3487,6 +3543,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     verification_clicks: dict[str, int] = {}
     playbook_archive_blocks: dict[str, int] = {}
     playbook_attempted: set[str] = set()
+    wayback_redirects_followed: set[str] = set()
+    wayback_redirect_hops = 0
     forced_context_scrolls = 0
 
     def mark_playbook_attempt(current_url: str, current_knowledge: dict) -> None:
@@ -3533,6 +3591,35 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 response_status = _page_response_status(engine, tab)
                 verification_reason = _transient_verification_reason(dom, response_status)
                 down_reason = _content_down_reason(dom, response_status)
+                if _is_wayback_url(url) and not verification_reason and wayback_redirect_hops < 4:
+                    redirect_target = _wayback_redirect_target(engine, tab, url)
+                    if redirect_target and redirect_target not in wayback_redirects_followed:
+                        wayback_redirects_followed.add(redirect_target)
+                        wayback_redirect_hops += 1
+                        STATE.update(
+                            status="navigating",
+                            url=redirect_target,
+                            host=_host_of(redirect_target),
+                            note="following archived redirect to successor domain",
+                        )
+                        STATE.push_trace({
+                            "ts": _now(),
+                            "message": "following archived redirect to successor domain",
+                            "step": step_no,
+                            "from": url,
+                            "to": redirect_target,
+                            "hop": wayback_redirect_hops,
+                        })
+                        engine, tab = _navigate_with_tab_recovery(
+                            engine, tab, redirect_target, timeout, deadline,
+                            reason="archived redirect follow", step_no=step_no,
+                        )
+                        engine, tab, bh = _wait_for_load_with_tab_recovery(
+                            engine, tab, redirect_target, timeout, deadline,
+                            reason="archived redirect follow", step_no=step_no,
+                        )
+                        _job_sleep(1, deadline)
+                        continue
                 if (
                     down_reason and not verification_reason
                     and url and not _is_wayback_url(url)
