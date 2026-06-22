@@ -18,6 +18,7 @@ extension enabled. Verify with `open-browser-use info`.
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from pathlib import Path
 
@@ -52,6 +53,7 @@ class RealChromeEngine(BrowserEngine):
         self._socket_path = socket_path
         self._timeout = timeout
         self._client = None
+        self._lock = threading.RLock()
 
     # ---- lifecycle ----
     def connect(self) -> "RealChromeEngine":
@@ -75,12 +77,13 @@ class RealChromeEngine(BrowserEngine):
         return bh
 
     def close(self) -> None:
-        if self._client is not None:
-            try:
-                self._client.turn_ended()
-            finally:
-                self._client.close()
-                self._client = None
+        with self._lock:
+            if self._client is not None:
+                try:
+                    self._client.turn_ended()
+                finally:
+                    self._client.close()
+                    self._client = None
 
     def _c(self):
         if self._client is None:
@@ -89,28 +92,32 @@ class RealChromeEngine(BrowserEngine):
 
     # ---- tabs ----
     def new_tab(self, url: str | None = None) -> TabHandle:
-        c = self._c()
-        created = c.create_tab()
-        tab_id = created["id"] if isinstance(created, dict) else created
-        c.attach(tab_id)
-        handle = TabHandle(id=tab_id, backend=self.name)
-        if url:
-            self.navigate(handle, url)
-        return handle
+        with self._lock:
+            c = self._c()
+            created = c.create_tab()
+            tab_id = created["id"] if isinstance(created, dict) else created
+            c.attach(tab_id)
+            handle = TabHandle(id=tab_id, backend=self.name)
+            if url:
+                self.navigate(handle, url)
+            return handle
 
     def claim_tab(self, tab_id: int) -> TabHandle:
         """Adopt an existing tab from your real session (e.g. an already
         logged-in twitter/x tab) instead of opening a fresh one."""
-        c = self._c()
-        c.claim_user_tab(tab_id)
-        c.attach(tab_id)
-        return TabHandle(id=tab_id, backend=self.name)
+        with self._lock:
+            c = self._c()
+            c.claim_user_tab(tab_id)
+            c.attach(tab_id)
+            return TabHandle(id=tab_id, backend=self.name)
 
     def user_tabs(self) -> list[dict]:
-        return self._c().get_user_tabs()
+        with self._lock:
+            return self._c().get_user_tabs()
 
     def session_tabs(self) -> list[dict]:
-        return self._c().get_tabs()
+        with self._lock:
+            return self._c().get_tabs()
 
     def close_tab(self, tab: TabHandle) -> None:
         try:
@@ -120,7 +127,9 @@ class RealChromeEngine(BrowserEngine):
 
     # ---- the one seam ----
     def cdp(self, tab: TabHandle, method: str, params: dict | None = None) -> dict:
-        return self._c().execute_cdp(tab.id, method, params or {})
+        with self._lock:
+            return self._c().execute_cdp(tab.id, method, params or {})
 
     def finalize(self, keep: list[dict] | None = None) -> None:
-        self._c().finalize_tabs(keep or [])
+        with self._lock:
+            self._c().finalize_tabs(keep or [])
