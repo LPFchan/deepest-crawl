@@ -572,7 +572,11 @@ def _close_job_tab(engine, tab, *, reason: str = "job cleanup") -> None:
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         message = "browser tab close failed"
-        if "Debugger unattached" in error or "No tab with id" in error:
+        if (
+            "Debugger unattached" in error
+            or "No tab with id" in error
+            or "not part of browser session" in error
+        ):
             message = "browser tab already closed or detached"
         STATE.push_trace({
             "ts": _now(),
@@ -785,6 +789,66 @@ def _new_tab_with_retry(engine, url: str | None, timeout_seconds: float, deadlin
         engine = _reconnect_engine(_remaining_seconds(deadline, timeout_seconds))
         _check_job_open(deadline)
         return engine, engine.new_tab(url)
+
+
+def _is_tab_session_error(exc: Exception) -> bool:
+    message = f"{type(exc).__name__}: {exc}"
+    return (
+        "not part of browser session" in message
+        or "No tab with id" in message
+        or "Debugger unattached" in message
+    )
+
+
+def _navigate_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
+                                deadline: float, *, reason: str,
+                                step_no: int | None = None):
+    """Navigate, recovering when the OBU session loses ownership of the tab."""
+    try:
+        engine.navigate(tab, url)
+        return engine, tab
+    except Exception as exc:
+        if not _is_tab_session_error(exc):
+            raise
+        trace = {
+            "ts": _now(),
+            "message": "tab detached during navigation; reconnecting",
+            "reason": reason,
+            "tab": getattr(tab, "id", ""),
+            "url": url,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if step_no is not None:
+            trace["step"] = step_no
+        STATE.push_trace(trace)
+
+    engine = _reconnect_engine(_remaining_seconds(deadline, timeout_seconds))
+    try:
+        tab = engine.claim_tab(int(getattr(tab, "id")))
+        engine.navigate(tab, url)
+        _set_active_tab(engine, tab)
+        STATE.push_trace({
+            "ts": _now(),
+            "message": "reclaimed detached browser tab",
+            "reason": reason,
+            "tab": getattr(tab, "id", ""),
+        })
+        return engine, tab
+    except Exception as exc:
+        trace = {
+            "ts": _now(),
+            "message": "tab reclaim failed; opening replacement tab",
+            "reason": reason,
+            "tab": getattr(tab, "id", ""),
+            "url": url,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if step_no is not None:
+            trace["step"] = step_no
+        STATE.push_trace(trace)
+        engine, tab = _new_tab_with_retry(engine, url, timeout_seconds, deadline)
+        _set_active_tab(engine, tab)
+        return engine, tab
 
 
 def _serialize(step: CrawlStep) -> dict:
@@ -1145,7 +1209,14 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                 })
                 STATE.update(status="navigating", note="trying Internet Archive snapshot",
                              url=archive_url, host=_host_of(archive_url))
-                engine.navigate(tab, archive_url)
+                engine, tab = _navigate_with_tab_recovery(
+                    engine,
+                    tab,
+                    archive_url,
+                    timeout,
+                    deadline,
+                    reason="direct archive fallback",
+                )
                 engine.activate(tab).wait_for_load(timeout=_remaining_seconds(deadline, 15))
                 _job_sleep(1, deadline)
                 url = engine.current_url(tab) or archive_url
@@ -2737,7 +2808,16 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                             "url": url,
                             "archive_url": archive_url,
                         })
-                        engine.navigate(tab, archive_url)
+                        engine, tab = _navigate_with_tab_recovery(
+                            engine,
+                            tab,
+                            archive_url,
+                            timeout,
+                            deadline,
+                            reason="agent archive fallback",
+                            step_no=step_no,
+                        )
+                        bh = engine.activate(tab)
                         bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
                         _job_sleep(1, deadline)
                         continue
@@ -3170,7 +3250,16 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     "url": source_url,
                     "archive_url": archive_url,
                 })
-                engine.navigate(tab, archive_url)
+                engine, tab = _navigate_with_tab_recovery(
+                    engine,
+                    tab,
+                    archive_url,
+                    timeout,
+                    deadline,
+                    reason="agent archive tool",
+                    step_no=step_no,
+                )
+                bh = engine.activate(tab)
                 bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
                 _job_sleep(1, deadline)
                 continue
