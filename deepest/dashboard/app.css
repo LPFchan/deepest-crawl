@@ -595,6 +595,13 @@ pre {
   padding: 12px 12px 0;
 }
 
+.agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .memory-editor {
   border-top: 1px solid var(--line);
   padding: 8px 12px 10px;

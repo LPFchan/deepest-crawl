@@ -222,6 +222,48 @@ async function clearActivity() {
   }
 }
 
+async function writeClipboardText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("copy command failed");
+    }
+  } finally {
+    textarea.remove();
+  }
+}
+
+async function copyActivityBlocks() {
+  const button = $("copy-chat-btn");
+  const blocks = Array.from(document.querySelectorAll("#chat-log .msg"))
+    .map((block) => block.innerText.trim())
+    .filter(Boolean);
+  if (!blocks.length) {
+    setBusy(button, false, "Nothing");
+    window.setTimeout(() => setBusy(button, false, "Copy"), 900);
+    return;
+  }
+  try {
+    await writeClipboardText(blocks.join("\n\n"));
+    setBusy(button, false, "Copied");
+  } catch (err) {
+    addMessage("tool", `Copy failed: ${String(err)}`);
+    setBusy(button, false, "Copy");
+    return;
+  }
+  window.setTimeout(() => setBusy(button, false, "Copy"), 1200);
+}
+
 function traceTimestamp(event, index) {
   const parsed = Date.parse(event?.ts || "");
   if (Number.isFinite(parsed)) return parsed;
@@ -1016,6 +1058,7 @@ function bindEvents() {
 
   $("domain-note-form").addEventListener("submit", saveDomainNote);
   $("domain-playbook-form").addEventListener("submit", saveDomainPlaybook);
+  $("copy-chat-btn").addEventListener("click", copyActivityBlocks);
   $("clear-chat-btn").addEventListener("click", clearActivity);
   $("refresh-links-btn").addEventListener("click", refreshLinks);
   $("crawl-all-btn").addEventListener("click", crawlAll);
