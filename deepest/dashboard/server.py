@@ -3793,6 +3793,16 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             playbook_key = _normal_url_key(_wayback_original_url(url) or url)
             playbook_block_count = playbook_archive_blocks.get(playbook_key, 0)
             playbook_attempted_here = playbook_key in playbook_attempted
+            # Only run the playbook planner when there are real playbooks. Notes are
+            # hints for the normal agent — they must not route through the planner,
+            # which is forbidden from emitting done and would loop forever (and
+            # mark_playbook_attempt only records playbook domains, so a notes-only
+            # domain would never clear this gate).
+            use_playbook_planner = (
+                bool(knowledge.get("playbooks"))
+                and not playbook_attempted_here
+                and not _is_wayback_url(url)
+            )
             STATE.push_trace({
                 "ts": _now(),
                 "message": "agent prompt domain memory",
@@ -3841,7 +3851,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             try:
                 if brain is None:
                     brain = _ensure_brain(_remaining_seconds(deadline, timeout))
-                if knowledge_text and not playbook_attempted_here and not _is_wayback_url(url):
+                if use_playbook_planner:
                     action, response = _choose_playbook_action(
                         brain,
                         instruction,
@@ -3938,7 +3948,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 raise
 
             STATE.update(response=response)
-            if not (knowledge_text and not playbook_attempted_here and not _is_wayback_url(url)):
+            if not use_playbook_planner:
                 action = _parse_action(response)
                 STATE.push_trace({
                     "ts": _now(),
