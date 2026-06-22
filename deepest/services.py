@@ -276,6 +276,22 @@ def _brain_failure_message(prefix: str, model: str) -> str:
     return "\n".join(pieces)
 
 
+def _mlx_server_args() -> list[str]:
+    args: list[str] = []
+    options = [
+        ("DEEPEST_MLX_VISION_CACHE_SIZE", "--vision-cache-size", "1"),
+        ("DEEPEST_MLX_PREFILL_STEP_SIZE", "--prefill-step-size", "512"),
+        ("DEEPEST_MLX_MAX_TOKENS", "--max-tokens", "384"),
+        ("DEEPEST_MLX_MAX_KV_SIZE", "--max-kv-size", "4096"),
+        ("DEEPEST_MLX_KV_BITS", "--kv-bits", ""),
+    ]
+    for env_name, flag, default in options:
+        value = os.environ.get(env_name, default).strip()
+        if value:
+            args.extend([flag, value])
+    return args
+
+
 def status() -> dict:
     from . import brain
 
@@ -340,6 +356,7 @@ def ensure_brain(status=None, wait_seconds: float | None = None):
     model = selected["model"]
     host = os.environ.get("DEEPEST_BRAIN_HOST", "127.0.0.1")
     port = os.environ.get("DEEPEST_BRAIN_PORT", "8765")
+    extra_args = _mlx_server_args()
     wait_s = wait_seconds if wait_seconds is not None else float(os.environ.get("DEEPEST_BRAIN_WAIT", "180"))
 
     if status:
@@ -354,7 +371,7 @@ def ensure_brain(status=None, wait_seconds: float | None = None):
     _BRAIN_LOG_HANDLE = log_path.open("a", buffering=1)
     _BRAIN_LOG_HANDLE.write(
         f"\n--- starting MLX brain at {time.strftime('%Y-%m-%d %H:%M:%S')} "
-        f"model={model} host={host} port={port} ---\n"
+        f"model={model} host={host} port={port} extra_args={extra_args} ---\n"
     )
     _BRAIN_PROC = subprocess.Popen(
         [
@@ -367,6 +384,7 @@ def ensure_brain(status=None, wait_seconds: float | None = None):
             host,
             "--port",
             port,
+            *extra_args,
         ],
         stdout=_BRAIN_LOG_HANDLE,
         stderr=subprocess.STDOUT,

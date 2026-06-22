@@ -84,6 +84,25 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _agent_brain_max_chars() -> int:
+    return _env_int("DEEPEST_AGENT_BRAIN_MAX_CHARS", 9000)
+
+
+def _agent_brain_max_tokens() -> int:
+    return _env_int("DEEPEST_AGENT_BRAIN_MAX_TOKENS", 384)
+
+
+def _agent_vision_max_tokens() -> int:
+    return _env_int("DEEPEST_AGENT_VISION_MAX_TOKENS", 256)
+
+
 def _crawl_timeout_seconds(value: float | None = None) -> float:
     return value if value and value > 0 else _env_float("DEEPEST_CRAWL_TIMEOUT_SECONDS", 300.0)
 
@@ -1241,7 +1260,12 @@ def _do_prompt(text: str):
     try:
         brain = _ensure_brain()
         # Use summarize_text as a generic prompt — it sends system + user
-        response = brain.summarize_text("prompt", text, max_chars=10000, max_tokens=1024)
+        response = brain.summarize_text(
+            "prompt",
+            text,
+            max_chars=_agent_brain_max_chars(),
+            max_tokens=_agent_brain_max_tokens(),
+        )
         STATE.update(response=response, status="done")
     except Exception as e:
         STATE.update(error=f"{type(e).__name__}: {e}", error_detail=_error_detail(e),
@@ -2806,7 +2830,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                                 AGENT_SYSTEM,
                                 vision_prompt,
                                 png,
-                                max_tokens=768,
+                                max_tokens=_agent_vision_max_tokens(),
                                 temperature=0.2,
                                 timeout=call_timeout,
                             ),
@@ -2822,7 +2846,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         response = _call_brain_with_retry(
                             lambda call_timeout: brain.summarize_text(
                                 f"agent-step-{step_no}", user_prompt,
-                                max_chars=18000, max_tokens=768,
+                                max_chars=_agent_brain_max_chars(),
+                                max_tokens=_agent_brain_max_tokens(),
                                 timeout=call_timeout,
                             ),
                             deadline, timeout, "agent brain step",
@@ -2831,7 +2856,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     response = _call_brain_with_retry(
                         lambda call_timeout: brain.summarize_text(
                             f"agent-step-{step_no}", user_prompt,
-                            max_chars=18000, max_tokens=768,
+                            max_chars=_agent_brain_max_chars(),
+                            max_tokens=_agent_brain_max_tokens(),
                             timeout=call_timeout,
                         ),
                         deadline, timeout, "agent brain step",
@@ -2970,8 +2996,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                                         instruction, last_url or url, obs,
                                         answer, extraction_text,
                                     ),
-                                    max_chars=18000,
-                                    max_tokens=768,
+                                    max_chars=_agent_brain_max_chars(),
+                                    max_tokens=_agent_brain_max_tokens(),
                                     timeout=call_timeout,
                                 ),
                                 deadline, timeout, "agent extracted summary",
