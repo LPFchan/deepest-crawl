@@ -27,6 +27,52 @@ from .base import BrowserEngine, TabHandle
 ACTIVE_REGISTRY = Path("/tmp/open-browser-use/active.json")
 
 
+def _make_client(socket_path: str, session_id: str, timeout: float):
+    from open_browser_use import client as obu_client  # type: ignore
+
+    class TolerantOpenBrowserUseClient(obu_client.OpenBrowserUseClient):
+        def request(self, method: str, params: obu_client.JsonObject | None = None):
+            self.connect()
+            if self._socket is None:
+                raise RuntimeError("Open Browser Use socket is not connected")
+            request_id = self._next_id
+            self._next_id += 1
+            merged_params: obu_client.JsonObject = {
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+            }
+            if params:
+                merged_params.update(params)
+            request = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": merged_params,
+            }
+            self._socket.sendall(obu_client.encode_frame(request))
+            while True:
+                response = obu_client.read_frame(self._socket)
+                if response.get("id") == request_id:
+                    if "error" in response:
+                        message = response["error"].get(
+                            "message", "Open Browser Use request failed"
+                        )
+                        raise RuntimeError(message)
+                    return response.get("result")
+                if "id" not in response and isinstance(response.get("method"), str):
+                    self._dispatch_notification(response)
+                    continue
+                # OBU can emit stale or bridge-owned response ids such as
+                # "OBU:2873"; keep reading until this request's response arrives.
+                continue
+
+    return TolerantOpenBrowserUseClient(
+        socket_path=socket_path,
+        session_id=session_id,
+        timeout=timeout,
+    )
+
+
 def discover_socket() -> str:
     """Read OBU's active-socket registry (written by the native host when Chrome
     + extension are live)."""
@@ -58,13 +104,10 @@ class RealChromeEngine(BrowserEngine):
 
     # ---- lifecycle ----
     def connect(self) -> "RealChromeEngine":
-        from open_browser_use.client import OpenBrowserUseClient  # type: ignore
         from ..bh import _ipc as bh_ipc  # bind BH's verbatim helpers to this engine
         with self._lock:
             sock = self._socket_path or discover_socket()
-            self._client = OpenBrowserUseClient(
-                socket_path=sock, session_id=self.session_id, timeout=self._timeout,
-            ).connect()
+            self._client = _make_client(sock, self.session_id, self._timeout).connect()
             bh_ipc.bind(self)
         return self
 
