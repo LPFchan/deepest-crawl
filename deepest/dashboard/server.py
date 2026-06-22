@@ -17,14 +17,17 @@ import io
 import importlib
 import json
 import os
+import queue as _queue
 import random
 import re
 import threading
 import time
 import traceback
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, Request
@@ -61,7 +64,113 @@ _FILE_LOCK = threading.Lock()
 _SERVICE_LOCK = threading.Lock()
 _SCREENSHOT_LOCK = threading.Lock()
 _ACTIVE_JOB_LOCK = threading.Lock()
+# Rebound by the job worker to the currently-running job's own cancel event, so a
+# Stop only ever cancels the job it was aimed at (never leaks to the next job).
 _CANCEL_EVENT = threading.Event()
+
+
+# --- Job queue ---------------------------------------------------------------
+# A single persistent worker thread drains _JOB_QUEUE one job at a time. The
+# worker IS the serializer; _RUN_LOCK (still acquired inside the runners) remains
+# the canonical "a browser job is running" signal that /screenshot and
+# /services/brain read.
+
+
+@dataclass
+class QueuedJob:
+    kind: str  # "crawl" | "fetch-all" | "agentic"
+    run: Callable[[], None]
+    id: str = ""  # link id, or "crawl-all" for a batch
+    url: str = ""
+    label: str = ""
+    cancel: threading.Event = field(default_factory=threading.Event)
+
+
+_JOB_QUEUE: "_queue.Queue[QueuedJob]" = _queue.Queue()
+_QUEUE_LOCK = threading.Lock()  # non-reentrant: never call _notify_queue/_refresh_queue_view while held
+_PENDING: list[QueuedJob] = []  # not-yet-running jobs, guarded by _QUEUE_LOCK
+_CURRENT_JOB: "QueuedJob | None" = None  # guarded by _QUEUE_LOCK
+_UNPAUSED = threading.Event()
+_UNPAUSED.set()  # set = running; clear() = paused
+# Lock-free snapshot read by _serialize on the SSE hot path; rebound atomically.
+_QUEUE_VIEW: dict = {"depth": 0, "ids": [], "items": [], "paused": False, "running": ""}
+
+
+def _refresh_queue_view() -> None:
+    """Rebuild the lock-free queue snapshot. Caller must NOT hold _QUEUE_LOCK."""
+    global _QUEUE_VIEW
+    with _QUEUE_LOCK:
+        view = {
+            "depth": len(_PENDING),
+            "ids": [j.id for j in _PENDING],
+            "items": [{"id": j.id, "url": j.url, "kind": j.kind, "label": j.label} for j in _PENDING],
+            "paused": not _UNPAUSED.is_set(),
+            "running": _CURRENT_JOB.id if _CURRENT_JOB else "",
+        }
+    _QUEUE_VIEW = view  # atomic rebind; readers need no lock
+
+
+def _notify_queue() -> None:
+    """Refresh the snapshot and push it to SSE clients. Caller must NOT hold _QUEUE_LOCK."""
+    _refresh_queue_view()
+    STATE.update()  # empty update still notifies listeners -> fresh _QUEUE_VIEW reaches clients
+
+
+def _enqueue(job: QueuedJob) -> str:
+    """Append a job to the queue. Single crawls dedup by link id. Returns status."""
+    with _QUEUE_LOCK:
+        if job.kind == "crawl" and (
+            (_CURRENT_JOB is not None and _CURRENT_JOB.id == job.id)
+            or any(j.id == job.id for j in _PENDING)
+        ):
+            return "already_queued"
+        _PENDING.append(job)
+    _JOB_QUEUE.put(job)
+    _notify_queue()
+    return "queued"
+
+
+def _wait_while_paused() -> bool:
+    """Block while the queue is paused; stay responsive to cancel.
+
+    Returns False if the current job was canceled during the wait, else True.
+    """
+    while not _UNPAUSED.wait(0.2):  # returns True once unpaused, False on timeout (still paused)
+        if _CANCEL_EVENT.is_set():
+            return False
+    return not _CANCEL_EVENT.is_set()
+
+
+def _job_worker() -> None:
+    global _CURRENT_JOB, _CANCEL_EVENT
+    while True:
+        job = _JOB_QUEUE.get()  # block for work
+        _UNPAUSED.wait()  # queue-level pause: don't START the next job while paused
+        with _QUEUE_LOCK:
+            if job in _PENDING:
+                _PENDING.remove(job)
+            _CURRENT_JOB = job
+            _CANCEL_EVENT = job.cancel  # rebind so Stop targets exactly this job
+        _refresh_queue_view()
+        # Clear the prior job's terminal frame during the engine/tab-setup gap before
+        # the runner emits its own "queued" frame. status must be NON-terminal.
+        STATE.current = CrawlStep(
+            id=job.id,
+            link_id=(job.id if job.kind == "crawl" else ""),
+            url=job.url,
+            status="starting",
+            note="Starting…",
+        )
+        try:
+            job.run()
+        except Exception as exc:  # never let the worker thread die or the queue freezes
+            STATE.update(error=f"{type(exc).__name__}: {exc}",
+                         error_detail=_error_detail(exc), status="error")
+        finally:
+            with _QUEUE_LOCK:
+                _CURRENT_JOB = None
+            _notify_queue()
+            _JOB_QUEUE.task_done()
 _SERVICE_STATE = {"status": "idle", "note": "", "error": ""}
 _LINKS_CACHE = {"mtime": None, "data": []}
 _RESULTS_CACHE = {"mtime": None, "data": {}}
@@ -1313,6 +1422,7 @@ def _serialize(step: CrawlStep) -> dict:
         "domain_playbooks": step.domain_playbooks[-20:],
         "has_screenshot": step.png_bytes is not None,
         "progress": STATE.progress,
+        "queue": _QUEUE_VIEW,
     }
     return _json_safe(d)
 
@@ -1845,12 +1955,11 @@ def _run_crawl_job(link: dict, timeout_seconds: float | None = None) -> None:
         STATE.current = CrawlStep(status="error", error="Another crawl job is already running.")
         return
     try:
-        _CANCEL_EVENT.clear()
+        # cancel lifecycle is per-job (worker rebinds _CANCEL_EVENT); no clear() here
         STATE.progress = {"done": 0, "total": 1}
         _do_crawl(link, timeout_seconds=timeout_seconds)
         STATE.progress = {"done": 1, "total": 1}
     finally:
-        _CANCEL_EVENT.clear()
         _RUN_LOCK.release()
 
 
@@ -1876,10 +1985,19 @@ def _run_fetch_all_job(
     jitter = _bulk_jitter_seconds(jitter_seconds)
     timeout = _crawl_timeout_seconds(timeout_seconds)
     try:
-        _CANCEL_EVENT.clear()
+        # cancel lifecycle is per-job (worker rebinds _CANCEL_EVENT); no clear() here
         STATE.progress = {"done": 0, "total": len(links)}
         for i, link in enumerate(links, 1):
-            if _CANCEL_EVENT.is_set():
+            if not _UNPAUSED.is_set():
+                STATE.current = CrawlStep(
+                    id="crawl-all",
+                    status="waiting",
+                    note=f"Paused after {i - 1} of {len(links)} URLs.",
+                )
+                STATE.progress = {"done": i - 1, "total": len(links)}
+            # Block here while paused (queue Pause halts the batch between URLs),
+            # staying responsive to Stop. False => canceled during the wait.
+            if not _wait_while_paused():
                 STATE.current = CrawlStep(
                     id="crawl-all",
                     status="canceled",
@@ -1910,7 +2028,6 @@ def _run_fetch_all_job(
             note=f"Crawl all complete: {len(links)} URLs.",
         )
     finally:
-        _CANCEL_EVENT.clear()
         _RUN_LOCK.release()
 
 
@@ -2008,8 +2125,6 @@ async def result_detail(link_id: str):
 @app.post("/fetch-all")
 async def fetch_all(req: FetchAllRequest):
     from fastapi.responses import JSONResponse
-    if _RUN_LOCK.locked():
-        return JSONResponse({"error": "Another crawl job is already running."}, status_code=409)
     all_links = _load_links()
     results = _load_results_by_id()
     by_id = {str(l.get("id")): l for l in all_links}
@@ -2036,13 +2151,14 @@ async def fetch_all(req: FetchAllRequest):
     delay = _bulk_delay_seconds(req.delay_seconds)
     jitter = _bulk_jitter_seconds(req.jitter_seconds)
     timeout = _crawl_timeout_seconds(req.timeout_seconds)
-    threading.Thread(
-        target=_run_fetch_all_job,
-        args=(selected, delay, jitter, timeout),
-        daemon=True,
-    ).start()
+    status = _enqueue(QueuedJob(
+        kind="fetch-all",
+        run=lambda: _run_fetch_all_job(selected, delay, jitter, timeout),
+        id="crawl-all",
+        label=f"{len(selected)} URLs",
+    ))
     return {
-        "status": "accepted",
+        "status": status,
         "count": len(selected),
         "delay_seconds": delay,
         "jitter_seconds": jitter,
@@ -2052,13 +2168,29 @@ async def fetch_all(req: FetchAllRequest):
 
 @app.post("/jobs/cancel")
 async def cancel_job():
-    if _RUN_LOCK.locked():
-        _CANCEL_EVENT.set()
+    with _QUEUE_LOCK:
+        job = _CURRENT_JOB
+    if job is not None:
+        job.cancel.set()  # targets exactly this job; never leaks to the next
         _close_active_tab()
         STATE.update(status="canceling", note="Cancel requested; stopping after current URL.")
         return {"status": "canceling"}
     STATE.current = CrawlStep(id="cancel", status="idle", note="No running crawl job.")
     return {"status": "idle"}
+
+
+@app.post("/jobs/pause")
+async def pause_queue():
+    _UNPAUSED.clear()
+    _notify_queue()
+    return {"status": "paused"}
+
+
+@app.post("/jobs/resume")
+async def resume_queue():
+    _UNPAUSED.set()
+    _notify_queue()
+    return {"status": "running"}
 
 
 @app.post("/links/refresh")
@@ -4784,11 +4916,10 @@ def _run_agentic_job(instruction: str, initial_url: str = "", timeout_seconds: f
         STATE.current = CrawlStep(status="error", error="Another crawl job is already running.")
         return
     try:
-        _CANCEL_EVENT.clear()
+        # cancel lifecycle is per-job (worker rebinds _CANCEL_EVENT); no clear() here
         STATE.progress = {"done": 0, "total": 0}
         _do_agentic(instruction, initial_url=initial_url, timeout_seconds=timeout_seconds)
     finally:
-        _CANCEL_EVENT.clear()
         _RUN_LOCK.release()
 
 
@@ -4918,8 +5049,6 @@ async def agent(req: AgentRequest):
         return JSONResponse({"error": str(exc)}, status_code=400)
     if memory_result:
         return memory_result
-    if _RUN_LOCK.locked():
-        return JSONResponse({"error": "Another crawl job is already running."}, status_code=409)
     initial_url = _extract_url(req.instruction)
     if _is_direct_crawl_instruction(req.instruction, initial_url):
         link = {
@@ -4929,30 +5058,31 @@ async def agent(req: AgentRequest):
             "sub_reason": "prompt",
             "prompt": req.instruction,
         }
-        threading.Thread(
-            target=_run_crawl_job,
-            args=(link, req.timeout_seconds),
-            daemon=True,
-        ).start()
+        status = _enqueue(QueuedJob(
+            kind="crawl",
+            run=lambda: _run_crawl_job(link, req.timeout_seconds),
+            id=link["id"],
+            url=initial_url,
+        ))
         return {
-            "status": "accepted",
+            "status": status,
             "instruction": req.instruction,
             "initial_url": initial_url,
             "mode": "direct_crawl",
         }
-    threading.Thread(
-        target=_run_agentic_job,
-        args=(req.instruction, initial_url, req.timeout_seconds),
-        daemon=True,
-    ).start()
-    return {"status": "accepted", "instruction": req.instruction, "initial_url": initial_url}
+    status = _enqueue(QueuedJob(
+        kind="agentic",
+        run=lambda: _run_agentic_job(req.instruction, initial_url, req.timeout_seconds),
+        id=_safe_link_id(initial_url) if initial_url else "agent",
+        url=initial_url,
+        label="agent",
+    ))
+    return {"status": status, "instruction": req.instruction, "initial_url": initial_url}
 
 
 @app.post("/crawl")
 async def crawl(req: CrawlRequest):
     from fastapi.responses import JSONResponse
-    if _RUN_LOCK.locked():
-        return JSONResponse({"error": "Another crawl job is already running."}, status_code=409)
     if not req.url or not req.url.startswith(("http://", "https://")):
         return JSONResponse({"error": "Invalid URL"}, status_code=400)
     link = {
@@ -4961,12 +5091,13 @@ async def crawl(req: CrawlRequest):
         "reason": req.reason,
         "sub_reason": req.sub_reason,
     }
-    threading.Thread(
-        target=_run_crawl_job,
-        args=(link, req.timeout_seconds),
-        daemon=True,
-    ).start()
-    return {"status": "accepted", "url": req.url}
+    status = _enqueue(QueuedJob(
+        kind="crawl",
+        run=lambda: _run_crawl_job(link, req.timeout_seconds),
+        id=link["id"],
+        url=req.url,
+    ))
+    return {"status": status, "url": req.url}
 
 
 @app.post("/prompt")
@@ -4976,6 +5107,11 @@ async def prompt(req: PromptRequest):
         return JSONResponse({"error": "Empty prompt"}, status_code=400)
     threading.Thread(target=_do_prompt, args=(req.text,), daemon=True).start()
     return {"status": "accepted", "text": req.text}
+
+
+@app.on_event("startup")
+def _start_job_worker():
+    threading.Thread(target=_job_worker, daemon=True, name="job-worker").start()
 
 
 @app.on_event("shutdown")
