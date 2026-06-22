@@ -25,7 +25,7 @@ import traceback
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, Response
@@ -2046,6 +2046,28 @@ AGENT_SYSTEM = (
 )
 
 
+PLAYBOOK_SYSTEM = (
+    "You convert domain playbooks into exactly one concrete browser action. "
+    "Output only one action in one of these formats:\n"
+    "navigate|URL\n"
+    "click|text|visible text of link/button\n"
+    "click|css|CSS selector\n"
+    "click|xy|x|y\n"
+    "type|css|CSS selector|text to type\n"
+    "type|xy|x|y|text to type\n"
+    "type|text|text to type into the currently focused field\n"
+    "press|key\n"
+    "submit|css|CSS selector\n"
+    "scroll|down\n"
+    "scroll|up\n"
+    "wait|seconds\n"
+    "back\n"
+    "reload\n\n"
+    "Archive actions are forbidden. Done/final summaries are forbidden. "
+    "If a playbook describes changing a URL, output navigate| with the changed URL."
+)
+
+
 def _looks_like_final_summary(text: str) -> bool:
     clean = " ".join(text.strip().split())
     if len(clean) < 80:
@@ -3135,6 +3157,54 @@ def _archive_action_url(target: str, current_url: str, initial_url: str,
     return source_url, _wayback_snapshot_url(source_url, deadline, exclude_urls=exclude_urls)
 
 
+def _playbook_action_prompt(instruction: str, url: str, knowledge_text: str,
+                            down_reason: str, obs: dict, dom: str) -> str:
+    return (
+        f"User instruction: {instruction}\n"
+        f"Current URL: {url}\n"
+        f"Content-down reason: {down_reason or 'none'}\n"
+        f"Domain playbooks and notes:\n{knowledge_text}\n\n"
+        f"Visible controls:\n{json.dumps(obs.get('controls', [])[:20], ensure_ascii=False)}\n"
+        f"Visible inputs:\n{json.dumps(obs.get('inputs', [])[:20], ensure_ascii=False)}\n"
+        f"Visible forms:\n{json.dumps(obs.get('forms', [])[:10], ensure_ascii=False)}\n"
+        f"Visible viewport text:\n{str(obs.get('viewport_text', ''))[:1500]}\n"
+        f"Raw page text excerpt:\n{dom[:1200]}\n\n"
+        "Choose the next non-archive browser action required by the domain playbook."
+    )
+
+
+def _choose_playbook_action(brain_mod, instruction: str, url: str, knowledge_text: str,
+                            down_reason: str, obs: dict, dom: str,
+                            deadline: float, timeout: float, step_no: int) -> tuple[dict, str]:
+    response = _call_brain_with_retry(
+        lambda call_timeout: brain_mod.complete(
+            PLAYBOOK_SYSTEM,
+            _playbook_action_prompt(instruction, url, knowledge_text, down_reason, obs, dom),
+            max_tokens=180,
+            timeout=call_timeout,
+        ),
+        deadline, timeout, "domain playbook planner",
+    )
+    action = _parse_action(response)
+    if action.get("action") in {"archive", "done", "ask"}:
+        STATE.push_trace({
+            "ts": _now(),
+            "message": "domain playbook planner produced unusable action",
+            "step": step_no,
+            "response": response,
+            "action": action,
+        })
+        return {"action": "ask", "raw": response}, response
+    STATE.push_trace({
+        "ts": _now(),
+        "message": "domain playbook planner chose action",
+        "step": step_no,
+        "response": response,
+        "action": action,
+    })
+    return action, response
+
+
 def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float | None = None,
                 source_link: dict | None = None):
     timeout = _crawl_timeout_seconds(timeout_seconds)
@@ -3380,7 +3450,20 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             try:
                 if brain is None:
                     brain = _ensure_brain(_remaining_seconds(deadline, timeout))
-                if verification_reason and getattr(brain, "has_vision", lambda: False)():
+                if knowledge_text and not playbook_attempted_here and not _is_wayback_url(url):
+                    action, response = _choose_playbook_action(
+                        brain,
+                        instruction,
+                        url,
+                        knowledge_text,
+                        down_reason,
+                        obs,
+                        dom,
+                        deadline,
+                        timeout,
+                        step_no,
+                    )
+                elif verification_reason and getattr(brain, "has_vision", lambda: False)():
                     png = _try_screenshot(engine, tab, attempts=1)
                     if png:
                         STATE.push_trace({
@@ -3464,14 +3547,21 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 raise
 
             STATE.update(response=response)
-            action = _parse_action(response)
-            STATE.push_trace({
-                "ts": _now(),
-                "message": "agent chose action",
-                "step": step_no,
-                "response": response,
-                "action": action,
-            })
+            if not (knowledge_text and not playbook_attempted_here and not _is_wayback_url(url)):
+                action = _parse_action(response)
+                STATE.push_trace({
+                    "ts": _now(),
+                    "message": "agent chose action",
+                    "step": step_no,
+                    "response": response,
+                    "action": action,
+                })
+            elif action.get("action") == "ask":
+                message = "Domain playbook planner could not produce a concrete browser action."
+                STATE.update(error=message, response=response, status="error")
+                _persist_agent_result(last_url or url, "failed", error=message,
+                                      error_detail=response, source_link=source_link)
+                return
 
             if action["action"] == "done":
                 answer = _clean_final_summary(action.get("answer", response))
