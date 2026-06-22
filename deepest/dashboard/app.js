@@ -454,12 +454,51 @@ function updateQueueSummary() {
   $("queue-summary").textContent = `${start}-${end} visible of ${state.queueFiltered} filtered / ${state.queueTotal} total`;
 }
 
+function captureLinkScrollAnchor(list) {
+  if (!list) return null;
+  const rows = Array.from(list.querySelectorAll("[data-link-id]"));
+  const listTop = list.getBoundingClientRect().top;
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect();
+    if (rect.bottom >= listTop) {
+      return {
+        id: row.dataset.linkId,
+        delta: rect.top - listTop,
+        scrollTop: list.scrollTop,
+        scrollHeight: list.scrollHeight,
+      };
+    }
+  }
+  return {
+    id: "",
+    delta: 0,
+    scrollTop: list.scrollTop,
+    scrollHeight: list.scrollHeight,
+  };
+}
+
+function restoreLinkScrollAnchor(list, anchor, fallbackTop = 0) {
+  if (!list || !anchor) return;
+  if (anchor.id) {
+    const row = list.querySelector(`[data-link-id="${CSS.escape(anchor.id)}"]`);
+    if (row) {
+      const listTop = list.getBoundingClientRect().top;
+      const rect = row.getBoundingClientRect();
+      list.scrollTop += rect.top - listTop - anchor.delta;
+      return;
+    }
+  }
+  list.scrollTop = Math.min(fallbackTop, Math.max(0, list.scrollHeight - list.clientHeight));
+}
+
 async function loadLinks(offset = 0, options = {}) {
   const nextOffset = Math.max(0, offset);
   const preserveScroll = Boolean(options.preserveScroll);
   const mode = options.mode || "replace";
   const list = $("link-list");
-  const previousScrollTop = preserveScroll ? list.scrollTop : 0;
+  const shouldAnchorScroll = preserveScroll || mode === "append" || mode === "prepend";
+  const scrollAnchor = shouldAnchorScroll ? captureLinkScrollAnchor(list) : null;
+  const previousScrollTop = shouldAnchorScroll ? list.scrollTop : 0;
   const previousScrollHeight = list.scrollHeight;
   const isInitial = !state.visibleLinks.length || nextOffset === 0;
   const replacing = mode === "replace";
@@ -513,11 +552,15 @@ async function loadLinks(offset = 0, options = {}) {
     state.queuePaging = false;
     renderLinks();
     if (mode === "append") {
-      list.scrollTop = previousScrollTop;
+      restoreLinkScrollAnchor(list, scrollAnchor, previousScrollTop);
     } else if (mode === "prepend") {
-      list.scrollTop = previousScrollTop + Math.max(0, list.scrollHeight - previousScrollHeight);
+      restoreLinkScrollAnchor(
+        list,
+        scrollAnchor,
+        previousScrollTop + Math.max(0, list.scrollHeight - previousScrollHeight),
+      );
     } else if (preserveScroll) {
-      list.scrollTop = Math.min(previousScrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
+      restoreLinkScrollAnchor(list, scrollAnchor, previousScrollTop);
     } else {
       list.scrollTop = 0;
     }
