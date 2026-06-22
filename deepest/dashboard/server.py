@@ -3561,6 +3561,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     wayback_redirects_followed: set[str] = set()
     wayback_redirect_hops = 0
     consecutive_waits = 0
+    consecutive_scrolls = 0
     forced_context_scrolls = 0
 
     def mark_playbook_attempt(current_url: str, current_knowledge: dict) -> None:
@@ -3936,6 +3937,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 return
 
             consecutive_waits = consecutive_waits + 1 if action["action"] == "wait" else 0
+            consecutive_scrolls = consecutive_scrolls + 1 if action["action"] == "scroll" else 0
 
             if action["action"] == "done":
                 answer = _clean_final_summary(action.get("answer", response))
@@ -4488,6 +4490,57 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "scroll":
+                if consecutive_scrolls >= 6 and not _is_wayback_url(last_url or url):
+                    # The agent keeps scrolling without finishing — typically an
+                    # image/manga gallery with little new text. The full body text is
+                    # already extracted, so summarize what we have and finish instead
+                    # of scrolling to the job timeout.
+                    content = extraction_text or last_dom or dom
+                    STATE.push_trace({
+                        "ts": _now(),
+                        "message": "scroll stalled; summarizing available content",
+                        "step": step_no,
+                        "scrolls": consecutive_scrolls,
+                        "content_words": _word_count(content),
+                    })
+                    try:
+                        summary = _call_brain_with_retry(
+                            lambda call_timeout: brain.summarize_text(
+                                f"agent-scroll-stall-{step_no}",
+                                _extraction_summary_prompt(
+                                    instruction, last_url or url, obs, "", content,
+                                ),
+                                max_chars=_agent_brain_max_chars(),
+                                max_tokens=_agent_brain_max_tokens(),
+                                timeout=call_timeout,
+                            ),
+                            deadline, timeout, "agent scroll-stall summary",
+                        )
+                        summary = _clean_final_summary(summary)
+                    except Exception as exc:
+                        STATE.push_trace({
+                            "ts": _now(),
+                            "message": "scroll-stall summary failed; using fallback",
+                            "step": step_no,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        })
+                        summary = _clean_final_summary(
+                            _fallback_summary(last_url or url, content, "scroll stalled")
+                        )
+                    if _summary_reports_unavailable(summary) or _word_count(summary) < 5:
+                        message = "Page content could not be summarized after repeated scrolling."
+                        STATE.update(error=message, status="error")
+                        _persist_agent_result(last_url or url, "failed", error=message,
+                                              source_link=source_link)
+                        return
+                    STATE.update(status="done", response=summary)
+                    _persist_agent_result(last_url or url, "ok", summary=summary,
+                                          source_link=source_link)
+                    _auto_learn_domain(
+                        brain, last_host, last_url, "agent-scroll-stall",
+                        STATE.current.trace, summary=summary,
+                    )
+                    return
                 mark_playbook_attempt(last_url or url, knowledge)
                 key = "PageUp" if action["direction"] == "up" else "PageDown"
                 amount = action.get("amount")
