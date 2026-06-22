@@ -434,10 +434,16 @@ def _wayback_snapshot_url(url: str, deadline: float | None = None,
             "url": source_url,
             "error": f"{type(exc).__name__}: {exc}",
         })
-    if exclude_urls:
-        return ""
     fallback = "https://web.archive.org/web/2/" + source_url
-    return "" if _normal_url_key(fallback) in excluded else fallback
+    if _normal_url_key(fallback) in excluded:
+        return ""
+    STATE.push_trace({
+        "ts": _now(),
+        "message": "using direct wayback replay fallback",
+        "url": source_url,
+        "archive_url": fallback,
+    })
+    return fallback
 
 
 def _load_json(path: Path, fallback):
