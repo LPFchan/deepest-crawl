@@ -369,6 +369,20 @@ pre {
   grid-template-columns: 1fr;
 }
 
+.queue-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -2px 0 10px;
+}
+
+.queued-count {
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .link-list {
   display: flex;
   flex: 1;
@@ -418,6 +432,11 @@ pre {
   border-color: rgba(15, 118, 110, 0.62);
   background: #ecfdf5;
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.link-row.queued {
+  border-color: rgba(180, 83, 9, 0.4);
+  background: #fffbeb;
 }
 
 .link-row.active.selected {
@@ -553,6 +572,10 @@ pre {
 .pill.failed {
   border-color: rgba(180, 35, 24, 0.35);
   color: var(--danger);
+}
+.pill.queued {
+  border-color: rgba(180, 83, 9, 0.4);
+  color: #b45309;
 }
 
 .browser-frame {

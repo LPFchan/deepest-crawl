@@ -12,6 +12,8 @@ const state = {
   lastError: "",
   loadingLinks: false,
   jobActive: false,
+  jobLinkId: "",
+  queue: { paused: false, depth: 0, ids: [] },
   queueTotal: 0,
   queueFiltered: 0,
   queuePageSize: 50,
@@ -53,9 +55,32 @@ function setBusy(button, busy, text) {
 function setJobActive(active) {
   const changed = state.jobActive !== active;
   state.jobActive = active;
+  if (!active) state.jobLinkId = "";
   $("stop-job-btn").hidden = !active;
   $("queue-actions").classList.toggle("idle", !active);
   if (changed) renderLinks();
+}
+
+function renderQueueControls() {
+  const wrap = $("queue-controls");
+  if (!wrap) return;
+  const q = state.queue || { paused: false, depth: 0, ids: [] };
+  const show = q.depth > 0 || q.paused;
+  wrap.hidden = !show;
+  $("queued-count").textContent = q.depth === 1 ? "1 queued" : `${q.depth} queued`;
+  const btn = $("pause-btn");
+  btn.textContent = q.paused ? "Resume" : "Pause";
+  btn.classList.toggle("accent", q.paused);
+}
+
+async function togglePause() {
+  const paused = !!(state.queue && state.queue.paused);
+  try {
+    const res = await fetch(paused ? "/jobs/resume" : "/jobs/pause", { method: "POST" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    addMessage("tool", String(err));
+  }
 }
 
 function applyPaneWidths(widths) {
@@ -365,6 +390,7 @@ function renderLinks() {
     return;
   }
 
+  const queuedIds = new Set(state.queue.ids || []);
   const rows = state.visibleLinks.map((row) => {
     const status = row.status || "pending";
     const cls = status === "success" || status === "ok" ? "ok" : status === "failed" ? "failed" : "";
@@ -372,7 +398,9 @@ function renderLinks() {
     const isCurrent = row.id === state.currentId;
     const active = isCurrent ? " active" : "";
     const selected = state.selectedIds.has(row.id) ? " selected" : "";
-    const control = (isCurrent && state.jobActive)
+    const isJobRow = state.jobActive && row.id === state.jobLinkId;
+    const queued = !isJobRow && queuedIds.has(row.id) ? " queued" : "";
+    const control = isJobRow
       ? `<button type="button" class="fetch-spin" data-stop-job="1" title="Stop crawl" aria-label="Stop crawl">
             <span class="spin-ring"></span>
             <span class="spin-stop"></span>
@@ -385,11 +413,12 @@ function renderLinks() {
       row.domain_notes ? `${row.domain_notes} notes` : "",
     ].filter(Boolean).join(" / ");
     return `
-      <div class="link-row${active}${selected}" data-link-id="${esc(row.id)}">
+      <div class="link-row${active}${selected}${queued}" data-link-id="${esc(row.id)}">
         <div>
           <div class="link-url" title="${esc(row.url)}">${esc(row.url)}</div>
           <div class="link-meta">
             <span class="pill ${cls}">${esc(label)}</span>
+            ${queued ? `<span class="pill queued">queued</span>` : ""}
             <span>${esc(meta)}</span>
           </div>
           ${row.error ? `<div class="link-error" title="${esc(row.error)}">${esc(row.error)}</div>` : ""}
@@ -812,28 +841,30 @@ async function configureBrainModel() {
   }
 }
 
-function fetchLink(id) {
+async function fetchLink(id) {
   const row = state.visibleLinks.find((link) => link.id === id);
   if (!row) return;
-  state.currentId = row.id;
   $("url-input").value = row.url;
-  clearChat();
-  setJobActive(true);
-  renderLinks();
   addMessage("user", `fetch: ${row.url}`);
-  fetch("/crawl", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      id: row.id,
-      url: row.url,
-      reason: row.reason,
-      sub_reason: row.sub_reason,
-    }),
-  }).catch((err) => {
-    setJobActive(false);
+  // No optimistic spinner/jobActive — SSE drives run-state, so a queued fetch
+  // shows a "queued" pill rather than moving the spinner onto this row.
+  try {
+    const res = await fetch("/crawl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: row.id,
+        url: row.url,
+        reason: row.reason,
+        sub_reason: row.sub_reason,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    if (data.status === "already_queued") addMessage("tool", `Already queued: ${row.url}`);
+  } catch (err) {
     addMessage("tool", String(err));
-  });
+  }
 }
 
 async function crawlAll() {
@@ -855,12 +886,8 @@ async function crawlAll() {
     return;
   }
   clearChat();
-  // Clear any stale current row so the spinner doesn't flash on the wrong row
-  // before the batch reports its first URL over SSE.
-  state.currentId = "";
-  setBusy($("crawl-all-btn"), true, "Running");
-  setJobActive(true);
-  renderLinks();
+  // No optimistic run-state: the batch may queue behind a running job. SSE drives
+  // jobActive/spinner/queued; the user's selection (.active) is preserved throughout.
   addMessage("user", `${usingSelection ? "crawl selected" : "crawl all"}: ${count}`);
   try {
     const res = await fetch("/fetch-all", {
@@ -876,11 +903,13 @@ async function crawlAll() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    addMessage("tool", `Accepted ${data.count} URLs; ${data.delay_seconds}s + ${data.jitter_seconds}s jitter between URLs; ${data.timeout_seconds}s timeout`);
+    if (data.status === "already_queued") {
+      addMessage("tool", `Already queued: ${data.count} URLs`);
+    } else {
+      addMessage("tool", `Queued ${data.count} URLs; ${data.delay_seconds}s + ${data.jitter_seconds}s jitter between URLs; ${data.timeout_seconds}s timeout`);
+    }
     if (usingSelection) clearSelection();
   } catch (err) {
-    setBusy($("crawl-all-btn"), false, usingSelection ? "Crawl Selected" : "Crawl All");
-    setJobActive(false);
     addMessage("tool", String(err));
   }
 }
@@ -1017,11 +1046,27 @@ function updateState(data) {
 
   state.currentUrl = data.url || state.currentUrl;
   state.currentHost = data.host || state.currentHost;
-  const prevCurrentId = state.currentId;
-  state.currentId = data.link_id || data.id || state.currentId;
-  // A batch job never sets currentId up front; it advances per URL over SSE.
-  // Re-render so the row spinner and active highlight follow the crawling row.
-  if (state.currentId !== prevCurrentId) renderLinks();
+  // The crawling row is tracked separately from the user's selection (currentId).
+  // Advance only on a real per-URL link_id; synthetic batch frames carry
+  // id "crawl-all" with an empty link_id, so the spinner holds on the
+  // last-crawled row through inter-URL waits instead of jumping to a phantom row.
+  const prevJobLinkId = state.jobLinkId;
+  if (!terminal && data.link_id) state.jobLinkId = data.link_id;
+  let needsLinkRender = state.jobLinkId !== prevJobLinkId;
+
+  // Queue state travels on every SSE frame; re-render rows/controls only on change.
+  if (data.queue) {
+    const q = { paused: !!data.queue.paused, depth: data.queue.depth || 0, ids: data.queue.ids || [] };
+    const changed = q.paused !== state.queue.paused
+      || q.depth !== state.queue.depth
+      || q.ids.join(",") !== (state.queue.ids || []).join(",");
+    if (changed) {
+      state.queue = q;
+      needsLinkRender = true;
+      renderQueueControls();
+    }
+  }
+  if (needsLinkRender) renderLinks();
 
   $("dom-text").textContent = data.dom_text || (data.mode === "vision" ? "[vision fallback]" : "-");
   $("error-text").textContent = data.error_detail || data.error || "-";
@@ -1080,42 +1125,48 @@ function connectEvents() {
 function bindEvents() {
   bindPaneResizers();
 
-  $("crawl-form").addEventListener("submit", (event) => {
+  $("crawl-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const url = $("url-input").value.trim();
     if (!url) return;
-    setBusy($("crawl-btn"), true, "Crawling");
-    setJobActive(true);
+    // No optimistic run-state — the job may be queued. SSE drives spinner/status.
     clearChat();
     addMessage("user", `crawl: ${url}`);
-    fetch("/crawl", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    }).catch((err) => {
-      setBusy($("crawl-btn"), false, "Crawl");
-      setJobActive(false);
+    try {
+      const res = await fetch("/crawl", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (data.status === "already_queued") addMessage("tool", `Already queued: ${url}`);
+    } catch (err) {
       addMessage("tool", String(err));
-    });
+    }
   });
 
-  $("prompt-form").addEventListener("submit", (event) => {
+  $("prompt-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = $("prompt-input");
     const instruction = input.value.trim();
     if (!instruction) return;
     input.value = "";
-    setBusy($("prompt-btn"), true, "Thinking");
     state.lastPrompt = instruction;
     addMessage("user", instruction);
-    fetch("/agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instruction }),
-    }).catch((err) => {
-      setBusy($("prompt-btn"), false, "Send");
+    // No optimistic "Thinking" — an agent job may queue behind a running job.
+    try {
+      const res = await fetch("/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (data.status === "already_queued") addMessage("tool", `Already queued: ${instruction}`);
+    } catch (err) {
       addMessage("tool", String(err));
-    });
+    }
   });
 
   $("domain-note-form").addEventListener("submit", saveDomainNote);
@@ -1125,6 +1176,7 @@ function bindEvents() {
   $("refresh-links-btn").addEventListener("click", refreshLinks);
   $("crawl-all-btn").addEventListener("click", crawlAll);
   $("stop-job-btn").addEventListener("click", cancelJob);
+  $("pause-btn").addEventListener("click", togglePause);
   $("start-services-btn").addEventListener("click", startServices);
   $("brain-model-select").addEventListener("change", configureBrainModel);
   $("reason-filter").addEventListener("change", () => {
