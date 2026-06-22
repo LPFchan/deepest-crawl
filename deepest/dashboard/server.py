@@ -1190,6 +1190,7 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
             if not (p.text or "").strip():
                 raise
             message = f"{type(brain_exc).__name__}: {brain_exc}"
+            detail = _fallback_summary(url, p.text or "", message)
             down_reason = _content_down_reason(p.text or "", _page_response_status(engine, tab))
             if down_reason:
                 failure = _content_down_failure_message(url, down_reason)
@@ -1201,10 +1202,15 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                 return
             STATE.push_trace({
                 "ts": _now(),
-                "message": "brain summary failed; using captured DOM text",
+                "message": "brain summary failed; failing crawl with captured DOM text",
                 "error": message,
             })
-            summary = _fallback_summary(url, p.text or "", message)
+            failure = f"Local brain summarization failed: {message}"
+            STATE.update(error=failure, error_detail=detail, status="error")
+            _persist_result(_result_from_state(
+                link, "failed", error=failure, error_detail=detail,
+            ))
+            return
         STATE.update(response=summary)
 
         _publish_screenshot(engine, tab, "captured final screenshot")
@@ -2834,6 +2840,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 fallback_text = _best_text_for_extraction(obs, dom)
                 if _is_brain_failure(brain_exc) and fallback_text.strip():
                     message = f"{type(brain_exc).__name__}: {brain_exc}"
+                    detail = _fallback_summary(url or last_url, fallback_text, message)
                     down_reason = _content_down_reason(fallback_text, response_status)
                     if down_reason:
                         failure = _content_down_failure_message(url or last_url, down_reason)
@@ -2848,17 +2855,21 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         _persist_agent_result(url or last_url, "failed", error=failure,
                                               error_detail=message, source_link=source_link)
                         return
-                    summary = _fallback_summary(url or last_url, fallback_text, message)
                     STATE.push_trace({
                         "ts": _now(),
-                        "message": "agent brain failed; using captured DOM text",
+                        "message": "agent brain failed; failing crawl with captured DOM text",
                         "step": step_no,
                         "error": message,
                     })
-                    summary = _clean_final_summary(summary)
-                    STATE.update(response=summary, status="done")
-                    _persist_agent_result(url or last_url, "ok", summary=summary,
-                                          source_link=source_link)
+                    failure = f"Local brain summarization failed: {message}"
+                    STATE.update(error=failure, error_detail=detail, status="error")
+                    _persist_agent_result(
+                        url or last_url,
+                        "failed",
+                        error=failure,
+                        error_detail=detail,
+                        source_link=source_link,
+                    )
                     return
                 raise
 
@@ -3012,6 +3023,18 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                                 "step": step_no,
                                 "error": message,
                             })
+                            if _is_brain_failure(refine_exc):
+                                detail = _fallback_summary(last_url or url, extraction_text, message)
+                                failure = f"Local brain summarization failed: {message}"
+                                STATE.update(error=failure, error_detail=detail, status="error")
+                                _persist_agent_result(
+                                    last_url or url,
+                                    "failed",
+                                    error=failure,
+                                    error_detail=detail,
+                                    source_link=source_link,
+                                )
+                                return
                             answer = _clean_final_summary(
                                 _fallback_summary(last_url or url, extraction_text, message)
                             )
