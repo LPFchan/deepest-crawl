@@ -117,12 +117,16 @@ def _notify_queue() -> None:
 
 
 def _enqueue(job: QueuedJob) -> str:
-    """Append a job to the queue. Single crawls dedup by link id. Returns status."""
+    """Append a job to the queue. Returns status.
+
+    Single crawls dedup only against jobs still PENDING (covers rapid double-clicks
+    before a job starts). We deliberately do NOT dedup against the currently-running
+    job: re-fetching a URL that is running — or stuck in its async cancel/cleanup —
+    means "run it again", so it queues and runs after the current one finishes.
+    Otherwise a just-cancelled job stays un-retryable until its cleanup completes.
+    """
     with _QUEUE_LOCK:
-        if job.kind == "crawl" and (
-            (_CURRENT_JOB is not None and _CURRENT_JOB.id == job.id)
-            or any(j.id == job.id for j in _PENDING)
-        ):
+        if job.kind == "crawl" and any(j.id == job.id for j in _PENDING):
             return "already_queued"
         _PENDING.append(job)
     _JOB_QUEUE.put(job)
