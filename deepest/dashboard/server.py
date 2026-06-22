@@ -2014,6 +2014,8 @@ AGENT_SYSTEM = (
     "Global content-down policy: if the page is 404, not found, removed, unavailable, "
     "or otherwise down, first apply any concrete domain playbook that matches "
     "the current URL or page state. If no playbook applies, use the archive tool. "
+    "When a domain playbook says to navigate, modify a URL, click, type, or search, "
+    "you must output that concrete non-archive action before any archive action. "
     "Cloudflare origin errors such as "
     "520, 521, 522, 523, 524, 525, 526, 527, and 530 are content-down states, "
     "not verification challenges. Emit archive|current for the current page, "
@@ -3052,7 +3054,14 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     archive_tried_urls: set[str] = set()
     verification_waits: dict[str, int] = {}
     verification_clicks: dict[str, int] = {}
+    playbook_archive_blocks: dict[str, int] = {}
+    playbook_attempted: set[str] = set()
     forced_context_scrolls = 0
+
+    def mark_playbook_attempt(current_url: str, current_knowledge: dict) -> None:
+        if current_knowledge.get("playbooks") and current_url and not _is_wayback_url(current_url):
+            playbook_attempted.add(_normal_url_key(_wayback_original_url(current_url) or current_url))
+
     try:
         _check_job_open(deadline)
         engine = _ensure_engine(_remaining_seconds(deadline, timeout))
@@ -3219,6 +3228,9 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
 
             # build prompt for brain
             knowledge_text = _domain_instruction_text(knowledge)
+            playbook_key = _normal_url_key(_wayback_original_url(url) or url)
+            playbook_block_count = playbook_archive_blocks.get(playbook_key, 0)
+            playbook_attempted_here = playbook_key in playbook_attempted
             extracted = obs.get("extracted") if isinstance(obs, dict) else {}
             article_text = extracted.get("text", "") if isinstance(extracted, dict) else ""
             article_source = extracted.get("source", "") if isinstance(extracted, dict) else ""
@@ -3234,6 +3246,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 f"Scroll: {json.dumps(obs.get('scroll', {}), ensure_ascii=False)}\n"
                 f"Transient verification: {verification_reason or 'none'}\n"
                 f"Content-down reason: {down_reason or 'none'}\n"
+                f"Domain playbook attempted: {'yes' if playbook_attempted_here else 'no'}\n"
+                f"Archive blocked by playbook policy: {playbook_block_count} times\n"
                 f"Visible controls:\n{json.dumps(obs.get('controls', [])[:30], ensure_ascii=False)}\n"
                 f"Visible inputs:\n{json.dumps(obs.get('inputs', [])[:20], ensure_ascii=False)}\n"
                 f"Visible forms:\n{json.dumps(obs.get('forms', [])[:10], ensure_ascii=False)}\n"
@@ -3589,6 +3603,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 return
 
             if action["action"] == "navigate":
+                mark_playbook_attempt(last_url or url, knowledge)
                 STATE.update(note=f"navigating to {action['url']}")
                 STATE.push_trace({
                     "ts": _now(),
@@ -3654,6 +3669,44 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         })
                         _job_sleep(5, deadline)
                         continue
+                archive_key = _normal_url_key(_wayback_original_url(last_url or url) or (last_url or url))
+                if (
+                    knowledge.get("playbooks")
+                    and archive_key not in playbook_attempted
+                    and not _is_wayback_url(last_url or url)
+                ):
+                    block_count = playbook_archive_blocks.get(archive_key, 0) + 1
+                    playbook_archive_blocks[archive_key] = block_count
+                    if block_count >= 3:
+                        message = (
+                            "Domain playbook was available but the agent repeatedly chose archive "
+                            "before attempting it."
+                        )
+                        STATE.push_trace({
+                            "ts": _now(),
+                            "message": "archive blocked; domain playbook not attempted",
+                            "step": step_no,
+                            "url": last_url or url,
+                            "blocks": block_count,
+                        })
+                        STATE.update(error=message, status="error")
+                        _persist_agent_result(last_url or url, "failed", error=message,
+                                              source_link=source_link)
+                        return
+                    STATE.update(
+                        note="archive blocked; domain playbook must be attempted first",
+                        response=response,
+                    )
+                    STATE.push_trace({
+                        "ts": _now(),
+                        "message": "archive deferred; domain playbook not attempted",
+                        "step": step_no,
+                        "url": last_url or url,
+                        "blocks": block_count,
+                        "playbooks": len(knowledge.get("playbooks", [])),
+                    })
+                    _job_sleep(0.5, deadline)
+                    continue
                 source_url, archive_url = _archive_action_url(
                     action.get("target", "current"),
                     last_url or url,
@@ -3708,6 +3761,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "click":
+                mark_playbook_attempt(last_url or url, knowledge)
                 STATE.update(note=f"clicking {action['by']}:{action.get('value', action.get('x', ''))}")
                 STATE.push_trace({
                     "ts": _now(),
@@ -3746,6 +3800,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "type":
+                mark_playbook_attempt(last_url or url, knowledge)
                 STATE.update(note=f"typing into {action['selector']}")
                 STATE.push_trace({
                     "ts": _now(),
@@ -3758,6 +3813,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "press":
+                mark_playbook_attempt(last_url or url, knowledge)
                 STATE.update(note=f"pressing {action['key']}")
                 STATE.push_trace({
                     "ts": _now(),
@@ -3770,6 +3826,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "autofill" and action.get("provider") == "bitwarden":
+                mark_playbook_attempt(last_url or url, knowledge)
                 STATE.update(note="requesting Bitwarden autofill")
                 STATE.push_trace({
                     "ts": _now(),
@@ -3782,6 +3839,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "login" and action.get("provider") == "bitwarden":
+                mark_playbook_attempt(last_url or url, knowledge)
                 selector = action.get("selector") or "auto"
                 STATE.update(note="requesting Bitwarden autofill and login submit")
                 STATE.push_trace({
@@ -3808,6 +3866,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "submit":
+                mark_playbook_attempt(last_url or url, knowledge)
                 STATE.update(note=f"submitting {action['selector']}")
                 STATE.push_trace({
                     "ts": _now(),
@@ -3824,6 +3883,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 continue
 
             if action["action"] == "scroll":
+                mark_playbook_attempt(last_url or url, knowledge)
                 key = "PageUp" if action["direction"] == "up" else "PageDown"
                 amount = action.get("amount")
                 STATE.push_trace({
