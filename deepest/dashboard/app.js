@@ -855,8 +855,12 @@ async function crawlAll() {
     return;
   }
   clearChat();
+  // Clear any stale current row so the spinner doesn't flash on the wrong row
+  // before the batch reports its first URL over SSE.
+  state.currentId = "";
   setBusy($("crawl-all-btn"), true, "Running");
   setJobActive(true);
+  renderLinks();
   addMessage("user", `${usingSelection ? "crawl selected" : "crawl all"}: ${count}`);
   try {
     const res = await fetch("/fetch-all", {
@@ -1013,7 +1017,11 @@ function updateState(data) {
 
   state.currentUrl = data.url || state.currentUrl;
   state.currentHost = data.host || state.currentHost;
+  const prevCurrentId = state.currentId;
   state.currentId = data.link_id || data.id || state.currentId;
+  // A batch job never sets currentId up front; it advances per URL over SSE.
+  // Re-render so the row spinner and active highlight follow the crawling row.
+  if (state.currentId !== prevCurrentId) renderLinks();
 
   $("dom-text").textContent = data.dom_text || (data.mode === "vision" ? "[vision fallback]" : "-");
   $("error-text").textContent = data.error_detail || data.error || "-";
