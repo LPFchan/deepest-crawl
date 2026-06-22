@@ -427,6 +427,69 @@ pre {
     0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 
+.fetch-spin {
+  position: relative;
+  display: grid;
+  place-items: center;
+  justify-self: center;
+  width: 30px;
+  height: 30px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.fetch-spin:hover {
+  filter: none;
+  background: rgba(180, 35, 24, 0.08);
+  border-color: rgba(180, 35, 24, 0.45);
+}
+
+.spin-ring {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(37, 99, 235, 0.22);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: fetch-spin-rotate 0.8s linear infinite;
+}
+
+.fetch-spin:hover .spin-ring {
+  border-color: rgba(180, 35, 24, 0.22);
+  border-top-color: var(--danger);
+}
+
+.spin-stop {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--danger);
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  transition: opacity 0.12s ease;
+}
+
+.fetch-spin:hover .spin-stop {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin-ring {
+    animation-duration: 2s;
+  }
+}
+
+@keyframes fetch-spin-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .link-url {
   overflow: hidden;
   color: var(--text);

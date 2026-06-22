@@ -11,6 +11,7 @@ const state = {
   lastPrompt: "",
   lastError: "",
   loadingLinks: false,
+  jobActive: false,
   queueTotal: 0,
   queueFiltered: 0,
   queuePageSize: 50,
@@ -50,8 +51,11 @@ function setBusy(button, busy, text) {
 }
 
 function setJobActive(active) {
+  const changed = state.jobActive !== active;
+  state.jobActive = active;
   $("stop-job-btn").hidden = !active;
   $("queue-actions").classList.toggle("idle", !active);
+  if (changed) renderLinks();
 }
 
 function applyPaneWidths(widths) {
@@ -365,8 +369,15 @@ function renderLinks() {
     const status = row.status || "pending";
     const cls = status === "success" || status === "ok" ? "ok" : status === "failed" ? "failed" : "";
     const label = status === "ok" ? "success" : status;
-    const active = row.id === state.currentId ? " active" : "";
+    const isCurrent = row.id === state.currentId;
+    const active = isCurrent ? " active" : "";
     const selected = state.selectedIds.has(row.id) ? " selected" : "";
+    const control = (isCurrent && state.jobActive)
+      ? `<button type="button" class="fetch-spin" data-stop-job="1" title="Stop crawl" aria-label="Stop crawl">
+            <span class="spin-ring"></span>
+            <span class="spin-stop"></span>
+          </button>`
+      : `<button type="button" data-fetch-id="${esc(row.id)}">Fetch</button>`;
     const meta = [
       row.reason || "unknown",
       row.host || "",
@@ -383,7 +394,7 @@ function renderLinks() {
           </div>
           ${row.error ? `<div class="link-error" title="${esc(row.error)}">${esc(row.error)}</div>` : ""}
         </div>
-        <button type="button" data-fetch-id="${esc(row.id)}">Fetch</button>
+        ${control}
       </div>`;
   }).join("");
   const start = state.queueOffset + 1;
@@ -808,8 +819,8 @@ function fetchLink(id) {
   $("url-input").value = row.url;
   clearChat();
   setJobActive(true);
-  addMessage("user", `fetch: ${row.url}`);
   renderLinks();
+  addMessage("user", `fetch: ${row.url}`);
   fetch("/crawl", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1127,6 +1138,12 @@ function bindEvents() {
   window.addEventListener("pointerup", endLinkDragSelection);
   window.addEventListener("pointercancel", endLinkDragSelection);
   $("link-list").addEventListener("click", (event) => {
+    const stop = event.target.closest("[data-stop-job]");
+    if (stop) {
+      event.stopPropagation();
+      cancelJob();
+      return;
+    }
     const button = event.target.closest("[data-fetch-id]");
     if (button) {
       event.stopPropagation();
