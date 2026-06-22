@@ -37,14 +37,6 @@ _CHROME_STATUS_CACHE = {
 
 KNOWN_BRAIN_MODELS = [
     {
-        "id": "qwen3.6-27b-heretic-mlx-4bit",
-        "label": "Qwen3.6 27B Heretic MLX 4-bit",
-        "model": "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit",
-        "vision": True,
-        "source": "huggingface",
-        "note": "Vision-capable, but currently Metal OOMs on this machine during generation.",
-    },
-    {
         "id": "holo-3.1-9b-mlx",
         "label": "Holo 3.1 9B MLX",
         "model": str(Path.home() / "models" / "Holo-3.1-9B-mlx"),
@@ -52,15 +44,17 @@ KNOWN_BRAIN_MODELS = [
         "source": "local",
         "note": "Vision-language Holo model for computer-use agents.",
     },
-    {
-        "id": "holo-3.1-9b",
-        "label": "Holo 3.1 9B",
-        "model": str(Path.home() / "models" / "Holo-3.1-9B"),
-        "vision": False,
-        "source": "local",
-        "note": "Local Holo source directory; this copy has no vision_tower tensors in its safetensors index.",
-    },
 ]
+
+# Default brain model: the sole curated, vision-capable option.
+DEFAULT_BRAIN_MODEL = KNOWN_BRAIN_MODELS[0]["model"]
+
+# Cached models removed from the curated selector that must not resurface via the
+# HF-cache scan: the 27B Metal-OOMs on this machine; the non-MLX Holo dir has no
+# vision tower.
+_HIDDEN_CACHED_MODELS = {
+    "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit",
+}
 
 
 def _enabled(name: str) -> bool:
@@ -157,10 +151,7 @@ def chrome_transport_status(*, ttl_seconds: float = 2.0, timeout: float | None =
 
 
 def _available_brain_models() -> list[dict]:
-    current = os.environ.get(
-        "DEEPEST_BRAIN_MODEL",
-        "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit",
-    )
+    current = os.environ.get("DEEPEST_BRAIN_MODEL", DEFAULT_BRAIN_MODEL)
     models: list[dict] = []
     seen: set[str] = set()
     for item in KNOWN_BRAIN_MODELS:
@@ -178,7 +169,7 @@ def _available_brain_models() -> list[dict]:
     if hf_root.exists():
         for path in sorted(hf_root.glob("models--*")):
             model = path.name.removeprefix("models--").replace("--", "/")
-            if model in seen:
+            if model in seen or model in _HIDDEN_CACHED_MODELS:
                 continue
             models.append({
                 "id": path.name.removeprefix("models--"),
@@ -215,10 +206,7 @@ def _resolve_brain_model(model_id: str | None = None,
             }
         raise ValueError(f"Unknown brain model: {requested}")
 
-    current = os.environ.get(
-        "DEEPEST_BRAIN_MODEL",
-        "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit",
-    )
+    current = os.environ.get("DEEPEST_BRAIN_MODEL", DEFAULT_BRAIN_MODEL)
     for item in models:
         if item["model"] == current:
             return item
@@ -308,10 +296,7 @@ def status() -> dict:
                 "http://127.0.0.1:8765/v1/chat/completions",
             ),
             "models_endpoint": brain.models_endpoint(),
-            "model": os.environ.get(
-                "DEEPEST_BRAIN_MODEL",
-                "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit",
-            ),
+            "model": os.environ.get("DEEPEST_BRAIN_MODEL", DEFAULT_BRAIN_MODEL),
             "autostart": _enabled("DEEPEST_BRAIN_AUTOSTART"),
             "managed_pid": _BRAIN_PROC.pid if _BRAIN_PROC and _BRAIN_PROC.poll() is None else None,
             "managed_exit_code": exit_code,

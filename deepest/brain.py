@@ -2,7 +2,7 @@
 
 Override via env vars:
   DEEPEST_BRAIN_ENDPOINT  (default: http://127.0.0.1:8765/v1/chat/completions)
-  DEEPEST_BRAIN_MODEL     (default: froggeric/Qwen3.6-27B-...)
+  DEEPEST_BRAIN_MODEL     (default: ~/models/Holo-3.1-9B-mlx)
   DEEPEST_BRAIN_VISION    (default: '1' — set to '0' for text-only models)
 """
 from __future__ import annotations
@@ -18,7 +18,7 @@ ENDPOINT = os.environ.get(
     "http://127.0.0.1:8765/v1/chat/completions",
 )
 MODEL = os.environ.get("DEEPEST_BRAIN_MODEL",
-    "froggeric/Qwen3.6-27B-Uncensored-Heretic-v2-MLX-4bit")
+    os.path.expanduser("~/models/Holo-3.1-9B-mlx"))
 HAS_VISION = os.environ.get("DEEPEST_BRAIN_VISION", "1") == "1"
 
 SYSTEM = (
