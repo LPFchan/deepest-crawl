@@ -2246,6 +2246,10 @@ AGENT_SYSTEM = (
     "Global content-down policy: if the page is 404, not found, removed, unavailable, "
     "or otherwise down, first apply any concrete domain playbook that matches "
     "the current URL or page state. If no playbook applies, use the archive tool. "
+    "Do not use the archive tool on a live page that has already loaded readable "
+    "content (for example after a verification check cleared): read and summarize "
+    "that live content instead. Only fall back to the archive when the live page is "
+    "genuinely 404, blocked, empty, or content-down. "
     "When a domain playbook says to navigate, modify a URL, click, type, or search, "
     "you must output that concrete non-archive action before any archive action. "
     "Cloudflare origin errors such as "
@@ -2768,6 +2772,14 @@ def _verify_summary_candidate(brain, instruction: str, url: str, obs: dict,
         return None
 
 
+def _is_float(value: str) -> bool:
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _parse_action(text: str) -> dict:
     lines = text.strip().split("\n")
     for line in lines:
@@ -2804,6 +2816,9 @@ def _parse_action(text: str) -> dict:
                     }
                 except ValueError:
                     return {"action": "ask", "raw": text}
+            # Tolerate click|x|y when the model drops the literal 'xy' token.
+            if parts[1] not in ("text", "css") and _is_float(parts[1]) and _is_float(parts[2]):
+                return {"action": "click", "by": "xy", "x": float(parts[1]), "y": float(parts[2])}
             return {"action": "click", "by": parts[1], "value": parts[2]}
         if action == "type" and len(parts) >= 3:
             if parts[1] == "text":
