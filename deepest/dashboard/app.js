@@ -139,6 +139,75 @@ async function clearQueue() { hideQueuePanel(); await postJob("/jobs/clear"); }
 async function removeQueued(uid) { await postJob("/jobs/remove", { uid }); }
 async function reorderQueue(uids) { await postJob("/jobs/reorder", { uids }); }
 
+// --- per-row context menu (right-click / three-dot) ---
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return ""; }
+}
+
+async function ignoreLink(id) {
+  await postJob("/links/ignore", { id });
+  state.visibleLinks = state.visibleLinks.filter((l) => l.id !== id);
+  renderLinks();
+  loadLinks(state.queueOffset, { preserveScroll: true });
+}
+
+async function ignoreDomain(host) {
+  if (!host) return;
+  await postJob("/links/ignore", { host });
+  loadLinks(0);
+}
+
+function closeContextMenu() {
+  const menu = $("ctx-menu");
+  if (menu) menu.hidden = true;
+}
+
+function openContextMenu(linkId, x, y) {
+  const link = state.visibleLinks.find((l) => l.id === linkId);
+  if (!link) return;
+  const host = link.host || hostOf(link.url) || "";
+  const menu = $("ctx-menu");
+  const items = [
+    `<button type="button" class="ctx-item" data-action="fetch">Fetch</button>`,
+    `<button type="button" class="ctx-item" data-action="queue">Add to queue</button>`,
+    `<div class="ctx-sep"></div>`,
+    `<button type="button" class="ctx-item danger" data-action="ignore">Ignore this link</button>`,
+  ];
+  if (host) {
+    items.push(`<button type="button" class="ctx-item danger" data-action="ignore-host">Ignore ${esc(host)}</button>`);
+    items.push(`<button type="button" class="ctx-item" data-action="search-host">Search ${esc(host)}</button>`);
+  }
+  menu.innerHTML = items.join("");
+  menu.dataset.linkId = linkId;
+  menu.dataset.host = host;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  menu.hidden = false;
+  const r = menu.getBoundingClientRect();
+  if (r.right > window.innerWidth - 8) menu.style.left = `${Math.max(8, window.innerWidth - r.width - 8)}px`;
+  if (r.bottom > window.innerHeight - 8) menu.style.top = `${Math.max(8, window.innerHeight - r.height - 8)}px`;
+}
+
+function onContextMenuAction(event) {
+  const item = event.target.closest("[data-action]");
+  if (!item) return;
+  const menu = $("ctx-menu");
+  const id = menu.dataset.linkId;
+  const host = menu.dataset.host;
+  closeContextMenu();
+  switch (item.dataset.action) {
+    case "fetch":
+    case "queue": fetchLink(id); break;
+    case "ignore": ignoreLink(id); break;
+    case "ignore-host": ignoreDomain(host); break;
+    case "search-host":
+      $("link-search").value = host;
+      clearSelection();
+      loadLinks(0);
+      break;
+  }
+}
+
 // pointer-based drag reorder within the queue panel
 let _drag = null;
 function onPanelPointerDown(event) {
@@ -529,7 +598,10 @@ function renderLinks() {
             <span class="spin-ring"></span>
             <span class="spin-stop"></span>
           </button>`
-      : `<button type="button" data-fetch-id="${esc(row.id)}">Fetch</button>`;
+      : `<div class="row-controls">
+            <button type="button" class="row-play" data-fetch-id="${esc(row.id)}" title="Fetch" aria-label="Fetch">▶</button>
+            <button type="button" class="row-menu" data-menu-id="${esc(row.id)}" title="More actions" aria-label="More actions">⋮</button>
+          </div>`;
     return `
       <div class="link-row${active}${selected}${queued}" data-link-id="${esc(row.id)}">
         <div>
@@ -1317,6 +1389,13 @@ function bindEvents() {
       cancelJob();
       return;
     }
+    const menuBtn = event.target.closest("[data-menu-id]");
+    if (menuBtn) {
+      event.stopPropagation();
+      const r = menuBtn.getBoundingClientRect();
+      openContextMenu(menuBtn.dataset.menuId, r.left, r.bottom + 2);
+      return;
+    }
     const button = event.target.closest("[data-fetch-id]");
     if (button) {
       event.stopPropagation();
@@ -1325,6 +1404,19 @@ function bindEvents() {
     }
     const row = event.target.closest("[data-link-id]");
     if (row) handleLinkRowClick(event, row.dataset.linkId);
+  });
+  $("link-list").addEventListener("contextmenu", (event) => {
+    const row = event.target.closest("[data-link-id]");
+    if (!row) return;
+    event.preventDefault();
+    openContextMenu(row.dataset.linkId, event.clientX, event.clientY);
+  });
+  $("ctx-menu").addEventListener("click", onContextMenuAction);
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#ctx-menu")) closeContextMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeContextMenu();
   });
   $("link-list").addEventListener("scroll", loadMoreIfNeeded);
 }

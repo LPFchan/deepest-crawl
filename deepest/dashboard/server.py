@@ -59,6 +59,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 LINKS_PATH = ROOT / "inputs" / "links.json"
 RESULTS_PATH = ROOT / "outputs" / "summaries.json"
+IGNORED_PATH = ROOT / "outputs" / "ignored.json"
 DOMAIN_KNOWLEDGE_DIR = ROOT / "outputs" / "domain-knowledge"
 _RUN_LOCK = threading.Lock()
 _FILE_LOCK = threading.Lock()
@@ -199,6 +200,7 @@ def _job_worker() -> None:
             _notify_queue()
 _SERVICE_STATE = {"status": "idle", "note": "", "error": ""}
 _LINKS_CACHE = {"mtime": None, "data": []}
+_IGNORED_CACHE = {"mtime": None, "ids": set(), "hosts": set()}
 _RESULTS_CACHE = {"mtime": None, "data": {}}
 _DOMAIN_NOTE_COUNT_CACHE: dict[str, tuple[float | None, int]] = {}
 _SCREENSHOT_TAB = None
@@ -695,6 +697,31 @@ def _invalidate_link_caches() -> None:
     _LINKS_CACHE.update({"mtime": None, "data": []})
     _RESULTS_CACHE.update({"mtime": None, "data": {}})
     _DOMAIN_NOTE_COUNT_CACHE.clear()
+
+
+def _load_ignored() -> tuple[set, set]:
+    """Return (ignored_link_ids, ignored_hosts), cached by file mtime."""
+    mtime = _mtime(IGNORED_PATH)
+    if _IGNORED_CACHE["mtime"] != mtime:
+        data = _load_json(IGNORED_PATH, {}) or {}
+        _IGNORED_CACHE.update({
+            "mtime": mtime,
+            "ids": {str(x) for x in data.get("ids", [])},
+            "hosts": {str(x).lower() for x in data.get("hosts", [])},
+        })
+    return _IGNORED_CACHE["ids"], _IGNORED_CACHE["hosts"]
+
+
+def _add_ignored(link_id: str | None = None, host: str | None = None) -> None:
+    data = _load_json(IGNORED_PATH, {}) or {}
+    ids = {str(x) for x in data.get("ids", [])}
+    hosts = {str(x).lower() for x in data.get("hosts", [])}
+    if link_id:
+        ids.add(str(link_id))
+    if host:
+        hosts.add(str(host).lower())
+    _write_json(IGNORED_PATH, {"ids": sorted(ids), "hosts": sorted(hosts)})
+    _IGNORED_CACHE["mtime"] = None  # force reload on next read
 
 
 def _load_links() -> list[dict]:
@@ -1727,6 +1754,11 @@ class QueueItemRequest(BaseModel):
     uid: str
 
 
+class IgnoreRequest(BaseModel):
+    id: str | None = None
+    host: str | None = None
+
+
 class DomainNoteRequest(BaseModel):
     url: str = ""
     host: str = ""
@@ -2256,8 +2288,13 @@ def _filter_links(
     q_norm = q.strip().lower()
     reason_norm = reason.strip().lower()
     status_norm = _normalize_status_filter(status)
+    ignored_ids, ignored_hosts = _load_ignored()
 
     def keep(link: dict) -> bool:
+        if str(link.get("id")) in ignored_ids:
+            return False
+        if ignored_hosts and _host_of(link.get("url", "")).lower() in ignored_hosts:
+            return False
         if q_norm and q_norm not in str(link.get("url", "")).lower():
             return False
         if reason_norm and reason_norm != str(link.get("reason", "")).lower():
@@ -2426,6 +2463,15 @@ async def clear_queue():
         STATE.update(status="canceling", note="Queue cleared; stopping current job.")
     _notify_queue()
     return {"status": "cleared"}
+
+
+@app.post("/links/ignore")
+async def ignore_link(req: IgnoreRequest):
+    from fastapi.responses import JSONResponse
+    if not req.id and not req.host:
+        return JSONResponse({"error": "Provide an id or a host to ignore."}, status_code=400)
+    _add_ignored(link_id=req.id, host=req.host)
+    return {"status": "ignored", "id": req.id, "host": req.host}
 
 
 @app.post("/links/refresh")
