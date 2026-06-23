@@ -179,9 +179,8 @@ pre {
 
 .app-shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100%;
-  position: relative;
 }
 
 .topbar {
@@ -440,15 +439,23 @@ pre {
 }
 
 /* --- Now-playing bottom bar (Spotify-style) --- */
+/* The dock pins the now-bar to the bottom of the left sidebar (queue-pane is a
+   flex column with the link-list as flex:1). Negative margins offset the pane
+   padding so the bar sits flush to the pane's rounded bottom edge. */
+.queue-dock {
+  position: relative;
+  margin: 8px -12px -12px;
+}
+
 .now-bar {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  grid-template-columns: 36px minmax(0, 1fr) 36px;
   align-items: center;
-  gap: 10px;
-  border-top: 1px solid var(--line-strong);
-  background: var(--surface);
-  padding: 8px 16px;
-  z-index: 30;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-muted);
+  padding: 8px 12px;
+  border-radius: 0 0 8px 8px;
 }
 
 .now-info {
@@ -489,27 +496,30 @@ pre {
   background: var(--surface-muted);
 }
 
-/* --- Slide-up queue panel --- */
+/* Queue panel floats above the now-bar, bounded to the sidebar width. */
 .queue-panel {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;            /* sits at the shell bottom; the now-bar overlays its lower edge */
-  max-height: 60vh;
+  left: 6px;
+  right: 6px;
+  bottom: 100%;            /* sits directly above the now-bar */
+  margin-bottom: 6px;
+  max-height: min(60vh, 460px);
   display: flex;
   flex-direction: column;
   background: var(--surface);
-  border-top: 1px solid var(--line-strong);
-  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
-  border-radius: 10px 10px 0 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.22);
   z-index: 40;
+  opacity: 1;
   transform: translateY(0);
-  transition: transform 0.18s ease;
+  transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
 .queue-panel[hidden] {
-  display: flex;            /* keep it laid out so the slide animates */
-  transform: translateY(100%);
+  display: flex;            /* keep laid out so it can fade/slide */
+  opacity: 0;
+  transform: translateY(8px);
   pointer-events: none;
 }
 
@@ -525,7 +535,7 @@ pre {
 
 .queue-panel-list {
   overflow: auto;
-  padding: 6px 10px 56px;   /* bottom pad clears the now-bar */
+  padding: 8px 10px;
 }
 
 .queue-row {

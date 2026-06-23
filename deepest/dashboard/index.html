@@ -62,6 +62,24 @@
           <span id="link-count" class="link-count"></span>
         </div>
         <div class="link-list" id="link-list"></div>
+
+        <div class="queue-dock">
+          <div class="queue-panel" id="queue-panel" hidden>
+            <div class="queue-panel-head">
+              <span>Queue</span>
+              <button class="icon-btn secondary" id="queue-panel-close" type="button" aria-label="Hide queue">▾</button>
+            </div>
+            <div class="queue-panel-list" id="queue-panel-list"></div>
+          </div>
+          <footer class="now-bar" id="now-bar" hidden>
+            <button class="icon-btn now-playpause" id="now-playpause" type="button" aria-label="Pause queue">⏸</button>
+            <button class="now-info" id="now-info" type="button" title="Show queue">
+              <span class="now-title" id="now-title">—</span>
+              <span class="now-progress" id="now-progress"></span>
+            </button>
+            <button class="icon-btn danger now-clear" id="now-clear" type="button" title="Clear queue and stop" aria-label="Clear queue and stop">✕</button>
+          </footer>
+        </div>
       </section>
 
       <div class="pane-resizer" data-resizer="queue-browser" role="separator" aria-orientation="vertical"></div>
@@ -127,23 +145,6 @@
         </form>
       </section>
     </main>
-
-    <div class="queue-panel" id="queue-panel" hidden>
-      <div class="queue-panel-head">
-        <span>Queue</span>
-        <button class="icon-btn secondary" id="queue-panel-close" type="button" aria-label="Hide queue">▾</button>
-      </div>
-      <div class="queue-panel-list" id="queue-panel-list"></div>
-    </div>
-
-    <footer class="now-bar" id="now-bar" hidden>
-      <button class="icon-btn now-playpause" id="now-playpause" type="button" aria-label="Pause queue">⏸</button>
-      <button class="now-info" id="now-info" type="button" title="Show queue">
-        <span class="now-title" id="now-title">—</span>
-        <span class="now-progress" id="now-progress"></span>
-      </button>
-      <button class="icon-btn danger now-clear" id="now-clear" type="button" title="Clear queue and stop" aria-label="Clear queue and stop">✕</button>
-    </footer>
   </div>
 
   <script src="/app.js"></script>
