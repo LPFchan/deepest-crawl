@@ -146,19 +146,26 @@ class RealChromeEngine(BrowserEngine):
             finally:
                 self._client = None
 
-    # Native JS dialogs (alert/confirm/prompt) open an OS-level modal that freezes the
-    # page's JS thread and carries text that never reaches the DOM, so the observer is
-    # blind to it. Wrap them in-page to record the message and auto-answer (alert ->
-    # undefined, confirm -> true, prompt -> default) instead of blocking.
+    # Native JS dialogs (alert/confirm/prompt) carry text that never reaches the DOM and,
+    # left native, freeze the page JS thread. Override them to record the message and
+    # auto-answer (alert -> undefined, confirm -> true, prompt -> default). Two details
+    # learned from probing real pages:
+    #   * inject the override through a real <script> element so it runs in the page's
+    #     MAIN world (where the page's own alert() lives), not the injector's world;
+    #   * store captures in sessionStorage, not a per-document window global, so a dialog
+    #     fired on a doc that immediately redirects (e.g. a deleted post -> site home)
+    #     survives the same-origin navigation and is still readable when the agent observes.
     _DIALOG_CAPTURE_JS = (
-        "(()=>{if(window.__deepestDialogHook)return;window.__deepestDialogHook=true;"
-        "window.__deepestDialogs=[];"
-        "var rec=function(t,m){try{window.__deepestDialogs.push({type:t,"
-        "message:String(m==null?'':m)});"
-        "if(window.__deepestDialogs.length>20)window.__deepestDialogs.shift();}catch(e){}};"
+        "(function(){if(window.__deepestDialogHook)return;window.__deepestDialogHook=true;"
+        "var s=document.createElement('script');"
+        "s.textContent=\"(function(){var K='__deepestDialogs';"
+        "var rec=function(t,m){try{var a=JSON.parse(sessionStorage.getItem(K)||'[]');"
+        "a.push({type:t,message:String(m==null?'':m)});if(a.length>20)a.shift();"
+        "sessionStorage.setItem(K,JSON.stringify(a));}catch(e){}};"
         "window.alert=function(m){rec('alert',m);};"
         "window.confirm=function(m){rec('confirm',m);return true;};"
-        "window.prompt=function(m,d){rec('prompt',m);return d==null?'':d;};})()"
+        "window.prompt=function(m,d){rec('prompt',m);return d==null?'':d;};})()\";"
+        "(document.documentElement||document).appendChild(s);s.remove();})()"
     )
 
     def _install_dialog_capture(self, tab: TabHandle) -> None:

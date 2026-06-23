@@ -3524,7 +3524,7 @@ def _observe_page(engine, tab) -> dict:
       h: innerHeight,
       pageH: document.documentElement.scrollHeight
     },
-    dialogs: (window.__deepestDialogs || []).slice(-10)
+    dialogs: (function(){try{return JSON.parse(sessionStorage.getItem('__deepestDialogs')||'[]').slice(-10)}catch(e){return []}})()
   };
 })()
 """
