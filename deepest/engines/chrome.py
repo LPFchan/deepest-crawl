@@ -167,6 +167,27 @@ class RealChromeEngine(BrowserEngine):
             c.attach(tab_id)
             return TabHandle(id=tab_id, backend=self.name)
 
+    def current_url(self, tab: TabHandle) -> str:
+        """Resolve the tab URL from the browser-level target list (CDP Target domain),
+        which stays responsive even when the page's main thread is blocked, instead of
+        an in-page location.href eval that a stuck page can stall on for the full CDP
+        budget. Fall back to the eval only if the target list lacks this tab, and turn a
+        CDP timeout there into '' rather than letting a wedged page raise."""
+        tid = getattr(tab, "id", tab)
+        try:
+            for getter in (self.session_tabs, self.user_tabs):
+                for t in getter() or []:
+                    if isinstance(t, dict) and str(t.get("id")) == str(tid) and t.get("url"):
+                        return t["url"]
+        except Exception:
+            pass
+        try:
+            return self.evaluate(tab, "location.href") or ""
+        except Exception as exc:
+            if "Timed out" in f"{exc}" and "waiting for CDP command" in f"{exc}":
+                return ""
+            raise
+
     def user_tabs(self) -> list[dict]:
         with self._lock:
             return self._c().get_user_tabs()

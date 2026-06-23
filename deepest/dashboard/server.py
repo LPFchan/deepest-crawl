@@ -1355,6 +1355,10 @@ def _new_tab_with_retry(engine, url: str | None, timeout_seconds: float, deadlin
     try:
         return engine, engine.new_tab(url)
     except Exception as exc:
+        if _is_cdp_timeout(exc):
+            # The page never let the navigation settle; a transport reconnect won't
+            # unstick it and re-issuing the same navigate just burns another 10s.
+            raise
         STATE.push_trace({
             "ts": _now(),
             "message": "opening tab failed; reconnecting Chrome transport",
@@ -1373,6 +1377,14 @@ def _is_tab_session_error(exc: Exception) -> bool:
         or "Debugger unattached" in message
         or "unexpected response id" in message
     )
+
+
+def _is_cdp_timeout(exc: Exception) -> bool:
+    """The OBU bridge aborted a CDP command at its 10s budget — the page never let
+    the command run (navigation never settled / main thread wedged). Distinct from a
+    session detach: reconnecting and retrying the SAME command just burns another 10s."""
+    message = f"{type(exc).__name__}: {exc}"
+    return "Timed out" in message and "waiting for CDP command" in message
 
 
 def _navigate_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
@@ -2203,12 +2215,20 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
     except Exception as e:
         detail = _error_detail(e)
         message = f"{type(e).__name__}: {e}"
+        cdp_timeout = _is_cdp_timeout(e)
+        if cdp_timeout:
+            message = ("Page unresponsive: a CDP command timed out after 10s "
+                       "(navigation never settled or the page main thread is blocked).")
         _trace("crawl failed", error=message)
         STATE.update(error=message, error_detail=detail, status="error")
         _persist_result(_result_from_state(link, "failed", error=message,
                                            error_detail=detail))
-        _append_domain_note(host, "crawl-error", message, url, STATE.current.trace)
-        _auto_learn_domain(brain, host, url, "failed", STATE.current.trace, error=message)
+        # A transient page-stall timeout is not a reusable domain fact — keep it out of
+        # the per-domain notes AND the brain auto-learn (the failure is still recorded in
+        # the crawl result). Otherwise every stuck page pollutes the domain knowledge.
+        if not cdp_timeout:
+            _append_domain_note(host, "crawl-error", message, url, STATE.current.trace)
+            _auto_learn_domain(brain, host, url, "failed", STATE.current.trace, error=message)
         needs_reconnect = _is_tab_session_error(e)
     finally:
         if needs_reconnect:
@@ -5319,6 +5339,10 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
 
     except Exception as e:
         message = f"{type(e).__name__}: {e}"
+        cdp_timeout = _is_cdp_timeout(e)
+        if cdp_timeout:
+            message = ("Page unresponsive: a CDP command timed out after 10s "
+                       "(navigation never settled or the page main thread is blocked).")
         STATE.push_trace({
             "ts": _now(),
             "message": "agent failed",
@@ -5329,8 +5353,10 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
         _persist_agent_result(last_url, "failed", error=message,
                               error_detail=_error_detail(e),
                               source_link=source_link)
-        _auto_learn_domain(brain, last_host, last_url, "agent-error",
-                           STATE.current.trace, error=message)
+        # Don't let a transient page-stall timeout become a learned per-domain note.
+        if not cdp_timeout:
+            _auto_learn_domain(brain, last_host, last_url, "agent-error",
+                               STATE.current.trace, error=message)
         needs_reconnect = _is_tab_session_error(e)
     finally:
         if _CURRENT_JOB is not None:
