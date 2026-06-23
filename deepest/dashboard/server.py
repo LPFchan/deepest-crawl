@@ -86,6 +86,8 @@ class QueuedJob:
     cancel: threading.Event = field(default_factory=threading.Event)
     inbox: "_queue.Queue[str]" = field(default_factory=_queue.Queue)  # live operator instructions
     steerable: threading.Event = field(default_factory=threading.Event)  # set while a drainable loop runs
+    member_ids: list = field(default_factory=list)  # per-URL link ids for a batch (fetch-all)
+    done_ids: set = field(default_factory=set)  # batch members already crawled (guarded by _QUEUE_LOCK)
 
 
 _JOB_QUEUE: "_queue.Queue[QueuedJob]" = _queue.Queue()
@@ -102,9 +104,19 @@ def _refresh_queue_view() -> None:
     """Rebuild the lock-free queue snapshot. Caller must NOT hold _QUEUE_LOCK."""
     global _QUEUE_VIEW
     with _QUEUE_LOCK:
+        # Per-URL queued ids: a batch contributes its member link ids (not the
+        # synthetic "crawl-all"), a single its own id, so the sidebar can mark each
+        # selected row "queued". The running batch contributes its not-yet-crawled
+        # members; the in-flight row is excluded client-side via jobLinkId.
+        ids: list = []
+        for j in _PENDING:
+            ids.extend(j.member_ids or [j.id])
+        cur = _CURRENT_JOB
+        if cur is not None and cur.kind == "fetch-all":
+            ids.extend(m for m in cur.member_ids if m not in cur.done_ids)
         view = {
             "depth": len(_PENDING),
-            "ids": [j.id for j in _PENDING],
+            "ids": ids,
             "items": [{"id": j.id, "url": j.url, "kind": j.kind, "label": j.label} for j in _PENDING],
             "paused": not _UNPAUSED.is_set(),
             "running": _CURRENT_JOB.id if _CURRENT_JOB else "",
@@ -2169,6 +2181,14 @@ def _run_fetch_all_job(
                 return
             _do_crawl(dict(link), timeout_seconds=timeout)
             STATE.progress = {"done": i, "total": len(links)}
+            # Drop this member from the sidebar "queued" set. Mutate under the lock,
+            # then notify in a SEPARATE scope (_QUEUE_LOCK is non-reentrant).
+            link_id = str(link.get("id") or "")
+            if link_id:
+                with _QUEUE_LOCK:
+                    if _CURRENT_JOB is not None and _CURRENT_JOB.kind == "fetch-all":
+                        _CURRENT_JOB.done_ids.add(link_id)
+                _notify_queue()
             if i < len(links):
                 wait = delay + (random.uniform(0, jitter) if jitter else 0)
                 STATE.current = CrawlStep(
@@ -2318,6 +2338,7 @@ async def fetch_all(req: FetchAllRequest):
         run=lambda: _run_fetch_all_job(selected, delay, jitter, timeout),
         id="crawl-all",
         label=f"{len(selected)} URLs",
+        member_ids=[str(l.get("id")) for l in selected if l.get("id")],
     ))
     return {
         "status": status,

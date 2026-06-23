@@ -65,9 +65,11 @@ function renderQueueControls() {
   const wrap = $("queue-controls");
   if (!wrap) return;
   const q = state.queue || { paused: false, depth: 0, ids: [] };
-  const show = q.depth > 0 || q.paused;
-  wrap.hidden = !show;
-  $("queued-count").textContent = q.depth === 1 ? "1 queued" : `${q.depth} queued`;
+  // Count queued URLs (a batch contributes one id per selected URL), so the badge
+  // matches the per-row "queued" pills rather than the job count.
+  const n = (q.ids || []).length;
+  wrap.hidden = !(n > 0 || q.paused);
+  $("queued-count").textContent = n === 1 ? "1 queued" : `${n} queued`;
   const btn = $("pause-btn");
   btn.textContent = q.paused ? "Resume" : "Pause";
   btn.classList.toggle("accent", q.paused);
@@ -1068,9 +1070,10 @@ function updateState(data) {
   state.currentUrl = data.url || state.currentUrl;
   state.currentHost = data.host || state.currentHost;
   // The crawling row is tracked separately from the user's selection (currentId).
-  // Advance only on a real per-URL link_id; synthetic batch frames carry
-  // id "crawl-all" with an empty link_id, so the spinner holds on the
-  // last-crawled row through inter-URL waits instead of jumping to a phantom row.
+  // During a batch, each per-URL frame carries the real link_id, so jobLinkId
+  // advances to the member being crawled (it gets the spinner, not a pill). The
+  // synthetic "crawl-all" inter-URL frames have an empty link_id, so the spinner
+  // holds on the last-crawled row through waits instead of jumping to a phantom row.
   const prevJobLinkId = state.jobLinkId;
   if (!terminal && data.link_id) state.jobLinkId = data.link_id;
   let needsLinkRender = state.jobLinkId !== prevJobLinkId;
