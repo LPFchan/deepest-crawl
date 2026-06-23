@@ -18,6 +18,17 @@ from urllib.parse import urlparse
 MIN_TEXT_CHARS = 200
 VISION_MAX_DIM = int(os.environ.get("DEEPEST_VISION_MAX_DIM", "640"))
 
+# Read the top document AND every readable same-origin sub-frame, joined. The real content
+# often sits in an embedded document (forum/CMS/portal/reader frames) while the top frame is
+# just site chrome; top-frame-only innerText misses it. Generic across sites — no per-site logic.
+_FRAME_TEXT_JS = (
+    "(function(){function t(d){try{return (d&&d.body)?d.body.innerText:''}catch(e){return ''}}"
+    "function go(d,o,dep){if(!d||dep>3||o.length>40)return;o.push(t(d));var f;"
+    "try{f=d.querySelectorAll('iframe,frame')}catch(e){return}"
+    "for(var i=0;i<f.length;i++){var c=null;try{c=f[i].contentDocument}catch(e){}if(c)go(c,o,dep+1)}}"
+    "var o=[];go(document,o,0);return o.join('\\n\\n').slice(0,200000)})()"
+)
+
 
 @dataclass
 class Perception:
@@ -60,7 +71,7 @@ def _dom_or_vision(engine, tab, fail_note: str = "") -> Perception:
         pass
 
     try:
-        text = h.js("document.body ? document.body.innerText : ''") or ""
+        text = h.js(_FRAME_TEXT_JS) or ""
     except Exception as e:
         text = ""
         fail_note = fail_note or f"dom_error:{e}"

@@ -3224,23 +3224,30 @@ def _summary_verifier_prompt(instruction: str, url: str, obs: dict,
     viewport_text = obs.get("viewport_text", "") if isinstance(obs, dict) else ""
     return (
         "You are the verifier for a web crawl summary. Decide whether the candidate "
-        "summary is faithful and sufficiently specific for the user's crawl request.\n\n"
-        "Accept concise summaries when they cover the central facts, concrete cause, "
-        "important numbers/specs/names, and outcome. Do not reject only because the "
-        "summary is shorter than the source. Extracted content may be sparse or empty "
-        "for sign-in-walled or script-heavy pages; in that case judge faithfulness "
-        "against the visible viewport text and the candidate itself, and do not decline "
-        "solely because the extracted content is short or empty. Decline if it is mostly browser status, "
-        "navigation chrome, vague paraphrase, missing the cause of the article, or "
-        "contradicts the extracted content. Decline if it mentions generic page chrome "
-        "such as navigation links, social media links, search bars, menus, sidebars, "
-        "footers, copyright or legal notices, sign-in/login/subscription gating "
-        "(for example 'requires sign-in to view lyrics'), recommendation modules such "
-        "as recommended, related, popular, or 'fans also like' items, "
-        "or extraction internals such as 'Extracted main content'. Decline "
-        "if it merely says the page is empty, blank, unavailable, or has no visible "
-        "content; that is a crawl failure or archive-search task, not a successful "
-        "page summary.\n\n"
+        "summary is faithful AND specific to THIS page for the user's crawl request. "
+        "Be strict: when in doubt, decline.\n\n"
+        "Accept only when the summary conveys the central facts, concrete cause, and the "
+        "important numbers/specs/names/dates/outcome of the page's actual content. Do not "
+        "reject only because the summary is shorter than the source.\n\n"
+        "Decline if the candidate merely describes the general TYPE or PURPOSE of the site "
+        "or page -- e.g. 'this is a second-hand marketplace / forum / blog / community with "
+        "categories, login, and features' -- instead of the specific item, listing, post, or "
+        "article the user asked to crawl (its title, price, specs, condition, names, dates, "
+        "key claims). If the summary could apply to thousands of other pages on the same "
+        "site, it is not faithful to THIS page -- decline.\n\n"
+        "Decline if it is mostly browser status, navigation chrome, vague paraphrase, "
+        "missing the cause of the article, or contradicts the extracted content. Decline if "
+        "it mentions generic page chrome such as navigation links, social media links, "
+        "search bars, menus, sidebars, footers, copyright or legal notices, "
+        "sign-in/login/subscription gating (for example 'requires sign-in to view lyrics'), "
+        "recommendation modules such as recommended, related, popular, or 'fans also like' "
+        "items, or extraction internals such as 'Extracted main content'.\n\n"
+        "If the real content is genuinely unreachable (e.g. a login or age wall you cannot "
+        "pass), the candidate must SAY SO plainly -- never accept a generic site description "
+        "as a stand-in for missing content. Decline if it merely says the page is empty, "
+        "blank, unavailable, or has no visible content; that is a crawl failure or "
+        "archive-search task (retry via the embedded content frame, vision, or the archive), "
+        "not a successful page summary.\n\n"
         "Output exactly one line:\n"
         "accept|short reason\n"
         "decline|short reason\n\n"
@@ -3508,12 +3515,36 @@ def _observe_page(engine, tab) -> dict:
     })
     .join('\\n')
     .slice(0, 5000);
+  // Same-origin frames: the real article often lives in an embedded document (forum/CMS/
+  // portal/print/reader frames) while the top frame is just site chrome. Collect every
+  // readable sub-document so the server can extract the richest article across frames.
+  // Fully generic — no per-site knowledge.
+  const frameDocs = [];
+  (function collect(doc, depth){
+    if (!doc || depth > 3 || frameDocs.length >= 6) return;
+    let fr;
+    try { fr = doc.querySelectorAll('iframe,frame'); } catch (e) { return; }
+    for (let i = 0; i < fr.length; i++) {
+      let cd = null;
+      try { cd = fr[i].contentDocument; } catch (e) { cd = null; }
+      if (!cd) continue;
+      let txt = '';
+      try { txt = cd.body ? cd.body.innerText : ''; } catch (e) { txt = ''; }
+      if (txt && txt.trim().length > 20) {
+        let furl = ''; try { furl = cd.location.href; } catch (e) {}
+        let fhtml = ''; try { fhtml = cd.documentElement ? cd.documentElement.outerHTML : ''; } catch (e) {}
+        frameDocs.push({ url: furl, text: txt.slice(0, 8000), html: fhtml.slice(0, 120000) });
+      }
+      collect(cd, depth + 1);
+    }
+  })(document, 0);
   return {
     title: document.title,
     url: location.href,
     text: (document.body ? document.body.innerText : '').slice(0, 5000),
     viewport_text: viewportText,
     html: (document.documentElement ? document.documentElement.outerHTML : '').slice(0, 400000),
+    frames: frameDocs,
     controls,
     inputs,
     forms,
@@ -3531,7 +3562,30 @@ def _observe_page(engine, tab) -> dict:
     obs = engine.evaluate(tab, script)
     if not isinstance(obs, dict):
         return {}
-    obs["extracted"] = _extract_main_content(obs.get("html", ""))
+    # Frame-aware main-content extraction: the article may live in a same-origin iframe
+    # while the top frame is only site chrome (which often carries MORE but lower-value
+    # text). Extract from the top frame and every readable sub-frame, then keep the frame
+    # whose article extraction is richest — preferring frames where trafilatura actually
+    # found an article over a chrome-heavy bs4 fallback. Fully generic; no per-site logic.
+    candidates = [{"url": obs.get("url", ""), "text": obs.get("text", ""),
+                   "html": obs.get("html", "")}]
+    candidates.extend(obs.pop("frames", None) or [])
+    extractions = [_extract_main_content(c.get("html", "")) for c in candidates]
+    article_frames = [(i, ex) for i, ex in enumerate(extractions)
+                      if ex.get("source") == "trafilatura"]
+    if article_frames:
+        best_i, best_ex = max(article_frames, key=lambda t: t[1].get("words", 0))
+    else:
+        best_i, best_ex = 0, extractions[0]
+    obs["extracted"] = best_ex
+    if best_i != 0:
+        # A sub-frame holds the real content; promote its text so the agent prompt and the
+        # summary see the article instead of the surrounding chrome.
+        bf = candidates[best_i]
+        obs["text"] = (bf.get("text") or obs.get("text", ""))[:5000]
+        obs["content_frame"] = bf.get("url", "")
+        STATE.push_trace({"ts": _now(), "message": "using embedded frame content",
+                          "frame": bf.get("url", ""), "words": best_ex.get("words", 0)})
     return obs
 
 
