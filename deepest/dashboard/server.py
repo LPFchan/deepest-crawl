@@ -3158,6 +3158,29 @@ def _summary_is_barebones(summary: str, obs: dict) -> bool:
     return False
 
 
+def _summary_is_degenerate(summary: str) -> str:
+    """Deterministic guard against a degenerate model generation -- a token/phrase
+    repetition loop or garbled output -- that an LLM verifier (often the same struggling
+    model) tends to rubber-stamp, especially since it only sees the plausible-looking head
+    of a truncated candidate. Returns a reason if the text looks degenerate, else ''."""
+    words = (summary or "").split()
+    n = len(words)
+    if n < 40:
+        return ""  # too short to judge repetition; leave it to the LLM verifier
+    counts: dict = {}
+    for w in words:
+        lw = w.lower()
+        counts[lw] = counts.get(lw, 0) + 1
+    unique = len(counts)
+    top_word, top_count = max(counts.items(), key=lambda kv: kv[1])
+    if unique / n < 0.12:
+        return f"repetitive/degenerate output: {unique} unique tokens across {n} words"
+    if top_count / n > 0.25:
+        return (f"repetitive/degenerate output: token "
+                f"'{top_word[:24]}' is {top_count} of {n} words")
+    return ""
+
+
 def _summary_reports_unavailable(summary: str) -> str:
     lower = " ".join((summary or "").lower().split())
     if not lower:
@@ -3226,6 +3249,10 @@ def _summary_verifier_prompt(instruction: str, url: str, obs: dict,
         "You are the verifier for a web crawl summary. Decide whether the candidate "
         "summary is faithful AND specific to THIS page for the user's crawl request. "
         "Be strict: when in doubt, decline.\n\n"
+        "First, decline immediately if the candidate is not coherent human-readable prose -- "
+        "for example a token, word, or phrase repeated many times, garbled text, random "
+        "characters, or mixed-script noise. A degenerate generation is never a valid "
+        "summary regardless of how it begins.\n\n"
         "Accept only when the summary conveys the central facts, concrete cause, and the "
         "important numbers/specs/names/dates/outcome of the page's actual content. Do not "
         "reject only because the summary is shorter than the source.\n\n"
@@ -3291,6 +3318,11 @@ def _verify_summary_candidate(brain, instruction: str, url: str, obs: dict,
             "reason": f"candidate reports unavailable content: {unavailable_reason}",
             "raw": candidate,
         }
+    degenerate_reason = _summary_is_degenerate(candidate)
+    if degenerate_reason:
+        STATE.push_trace({"ts": _now(), "message": "summary rejected as degenerate",
+                          "step": step_no, "reason": degenerate_reason})
+        return {"accepted": False, "reason": degenerate_reason, "raw": candidate[:300]}
     try:
         response = _call_brain_with_retry(
             lambda call_timeout: brain.summarize_text(
