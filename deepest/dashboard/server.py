@@ -1217,7 +1217,8 @@ def _live_chrome_screenshot() -> bytes | None:
         except Exception:
             tab = None
 
-        tab = tab or engine.new_tab("about:blank")
+        if tab is None:
+            return None  # nothing live to capture; don't spawn a throwaway about:blank tab
         png = _try_screenshot(engine, tab, attempts=1)
         if png:
             _SCREENSHOT_TAB = tab
@@ -2070,6 +2071,7 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                 initial_url=url,
                 timeout_seconds=_remaining_seconds(deadline, timeout),
                 source_link=link,
+                reuse=(engine, tab, pre_open_tab_ids),
             )
             return
         if down_reason and not _is_wayback_url(current_url):
@@ -2136,6 +2138,7 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                 initial_url=url,
                 timeout_seconds=_remaining_seconds(deadline, timeout),
                 source_link=link,
+                reuse=(engine, tab, pre_open_tab_ids),
             )
             return
         _check_job_open(deadline)
@@ -4089,7 +4092,7 @@ def _choose_playbook_action(brain_mod, instruction: str, url: str, knowledge_tex
 
 
 def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float | None = None,
-                source_link: dict | None = None):
+                source_link: dict | None = None, reuse: tuple | None = None):
     timeout = _crawl_timeout_seconds(timeout_seconds)
     deadline = _job_deadline(timeout)
     initial_host = _host_of(initial_url) if initial_url else ""
@@ -4130,27 +4133,36 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     operator_updates: list[str] = []
     try:
         _check_job_open(deadline)
-        engine = _ensure_engine(_remaining_seconds(deadline, timeout))
-        pre_open_tab_ids = _snapshot_tab_ids(engine)
-        engine, tab = _new_tab_with_retry(engine, None, timeout, deadline)
-        _set_active_tab(engine, tab)
-        _bring_tab_to_front(engine, tab)
-        engine.cdp(tab, "Page.enable")
-        bh = engine.activate(tab)
-        if initial_url:
-            STATE.update(status="navigating", note=f"opening {initial_url}")
-            STATE.push_trace({
-                "ts": _now(),
-                "message": "initial agent navigation",
-                "url": initial_url,
-            })
-            engine.navigate(tab, initial_url)
-            bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
-            engine, tab = _adopt_spawned_content_tab(
-                engine, tab, initial_url, pre_open_tab_ids, timeout, deadline,
-                reason="initial agent navigation", step_no=0,
-            )
+        if reuse is not None:
+            # Continue on the tab the caller already opened and navigated (e.g. _do_crawl's
+            # agentic fallback) instead of opening a second tab to the same URL.
+            engine, tab, pre_open_tab_ids = reuse
             _set_active_tab(engine, tab)
+            _bring_tab_to_front(engine, tab)
+            engine.cdp(tab, "Page.enable")
+            bh = engine.activate(tab)
+        else:
+            engine = _ensure_engine(_remaining_seconds(deadline, timeout))
+            pre_open_tab_ids = _snapshot_tab_ids(engine)
+            engine, tab = _new_tab_with_retry(engine, None, timeout, deadline)
+            _set_active_tab(engine, tab)
+            _bring_tab_to_front(engine, tab)
+            engine.cdp(tab, "Page.enable")
+            bh = engine.activate(tab)
+            if initial_url:
+                STATE.update(status="navigating", note=f"opening {initial_url}")
+                STATE.push_trace({
+                    "ts": _now(),
+                    "message": "initial agent navigation",
+                    "url": initial_url,
+                })
+                engine.navigate(tab, initial_url)
+                bh.wait_for_load(timeout=_remaining_seconds(deadline, 15))
+                engine, tab = _adopt_spawned_content_tab(
+                    engine, tab, initial_url, pre_open_tab_ids, timeout, deadline,
+                    reason="initial agent navigation", step_no=0,
+                )
+                _set_active_tab(engine, tab)
 
         MAX_STEPS = 20
         if _CURRENT_JOB is not None:
