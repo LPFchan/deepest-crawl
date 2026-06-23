@@ -206,6 +206,7 @@ _DOMAIN_NOTE_COUNT_CACHE: dict[str, tuple[float | None, int]] = {}
 _SCREENSHOT_TAB = None
 _LAST_SCREENSHOT_BYTES: bytes | None = None
 _ACTIVE_JOB = {"engine": None, "tab": None}
+_JOB_TABS: set = set()  # every tab id the current job touched, so reconnect-orphaned tabs get closed
 app = FastAPI(title="deepest-crawl dashboard")
 
 # Lazy imports — the dashboard can serve static content without the brain/engine loaded
@@ -1033,6 +1034,44 @@ def _set_active_tab(engine=None, tab=None) -> None:
     with _ACTIVE_JOB_LOCK:
         _ACTIVE_JOB["engine"] = engine
         _ACTIVE_JOB["tab"] = tab
+        tid = getattr(tab, "id", None)
+        if tid is not None:
+            _JOB_TABS.add(tid)  # track for end-of-job cleanup (covers reconnect orphans)
+
+
+def _close_job_tabs(engine, *, reason: str = "job cleanup") -> None:
+    """Close every tab the job touched (current + any orphaned by mid-job reconnects),
+    then clear the active-tab/tracking state. Uses the current (healthy) session: a tab
+    it still owns closes directly; one orphaned by a dead session is re-adopted then closed."""
+    with _ACTIVE_JOB_LOCK:
+        ids = list(_JOB_TABS)
+        _JOB_TABS.clear()
+        _ACTIVE_JOB["engine"] = None
+        _ACTIVE_JOB["tab"] = None
+    if engine is None:
+        return
+    closed = 0
+    for tid in ids:
+        th = TabHandle(id=tid, backend=getattr(engine, "name", "chrome"))
+        try:
+            engine.cdp(th, "Page.close", {})
+            closed += 1
+            continue
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+        if any(g in err for g in _TAB_GONE_ERRORS):
+            continue  # already gone
+        try:
+            engine.claim_tab(int(tid))  # orphaned by a reconnect: adopt into this session
+            engine.cdp(th, "Page.close", {})
+            closed += 1
+        except Exception as exc2:
+            STATE.push_trace({"ts": _now(), "message": "residual tab close failed",
+                              "reason": reason, "tab": tid,
+                              "error": f"{type(exc2).__name__}: {exc2}"})
+    if ids:
+        STATE.push_trace({"ts": _now(), "message": "closed job tabs",
+                          "reason": reason, "count": closed, "tracked": len(ids)})
 
 
 def _close_active_tab() -> None:
@@ -2134,14 +2173,11 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
         _auto_learn_domain(brain, host, url, "failed", STATE.current.trace, error=message)
         needs_reconnect = _is_tab_session_error(e)
     finally:
-        if tab is not None:
-            _close_job_tab(engine, tab, reason="crawl job finished")
-        _set_active_tab()
         if needs_reconnect:
-            # The shared Chrome debugger session detached; reconnect the transport
-            # so the next URL in a bulk run does not inherit the dead session.
+            # The shared Chrome debugger session detached; reconnect first so the
+            # cleanup below runs on a healthy session (and the next job does too).
             try:
-                _reconnect_engine()
+                engine = _reconnect_engine()
                 STATE.push_trace({
                     "ts": _now(),
                     "message": "reconnected Chrome transport after tab-session error",
@@ -2152,6 +2188,8 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                     "message": "Chrome transport reconnect failed",
                     "error": f"{type(reconnect_exc).__name__}: {reconnect_exc}",
                 })
+        # Close the current tab AND any orphaned by mid-job reconnects.
+        _close_job_tabs(engine, reason="crawl job finished")
 
 
 def _do_prompt(text: str):
@@ -5248,14 +5286,11 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             _drain_operator_inbox(operator_updates, -1)  # catch any last-moment delivery
             with _QUEUE_LOCK:
                 _CURRENT_JOB.steerable.clear()
-        if tab is not None:
-            _close_job_tab(engine, tab, reason="agent job finished")
-        _set_active_tab()
         if needs_reconnect:
-            # The shared Chrome debugger session detached; reconnect so the next
-            # URL in a bulk run does not inherit the dead session.
+            # The shared Chrome debugger session detached; reconnect first so the
+            # cleanup below runs on a healthy session (and the next job does too).
             try:
-                _reconnect_engine()
+                engine = _reconnect_engine()
                 STATE.push_trace({
                     "ts": _now(),
                     "message": "reconnected Chrome transport after tab-session error",
@@ -5266,6 +5301,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     "message": "Chrome transport reconnect failed",
                     "error": f"{type(reconnect_exc).__name__}: {reconnect_exc}",
                 })
+        # Close the current tab AND any orphaned by mid-job reconnects.
+        _close_job_tabs(engine, reason="agent job finished")
 
 
 def _run_agentic_job(instruction: str, initial_url: str = "", timeout_seconds: float | None = None) -> None:
