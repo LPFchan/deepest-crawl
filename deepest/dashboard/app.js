@@ -149,12 +149,15 @@ async function ignoreLink(id) {
   state.visibleLinks = state.visibleLinks.filter((l) => l.id !== id);
   renderLinks();
   loadLinks(state.queueOffset, { preserveScroll: true });
+  loadHosts();
 }
 
 async function ignoreDomain(host) {
   if (!host) return;
   await postJob("/links/ignore", { host });
+  if ($("host-filter").value === host) $("host-filter").value = "";
   loadLinks(0);
+  loadHosts();
 }
 
 function closeContextMenu() {
@@ -663,10 +666,26 @@ async function selectLink(id) {
 function currentQueueParams(limit, offset) {
   const q = $("link-search").value.trim();
   const status = $("status-filter").value;
+  const host = $("host-filter").value;
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (q) params.set("q", q);
   if (status) params.set("status", status);
+  if (host) params.set("host", host);
   return params;
+}
+
+async function loadHosts() {
+  try {
+    const res = await fetch("/links/hosts");
+    const data = await res.json();
+    const sel = $("host-filter");
+    if (!sel) return;
+    const current = sel.value;
+    const hosts = data.hosts || [];
+    sel.innerHTML = `<option value="">All hosts</option>` +
+      hosts.map((h) => `<option value="${esc(h.host)}">${esc(h.host)} (${h.count})</option>`).join("");
+    if (current && hosts.some((h) => h.host === current)) sel.value = current;
+  } catch (e) {}
 }
 
 function updateQueueSummary() {
@@ -1061,6 +1080,7 @@ async function crawlAll() {
         q,
         reason,
         status,
+        host: $("host-filter").value,
         ids: usingSelection ? ids : null,
         confirm_count: count,
       }),
@@ -1372,6 +1392,10 @@ function bindEvents() {
     clearSelection();
     loadLinks(0);
   });
+  $("host-filter").addEventListener("change", () => {
+    clearSelection();
+    loadLinks(0);
+  });
   $("link-search").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       clearSelection();
@@ -1425,6 +1449,7 @@ loadPaneWidths();
 bindEvents();
 connectEvents();
 loadLinks(0);
+loadHosts();
 loadServices();
 renderTrace([]);
 renderKnowledge([]);

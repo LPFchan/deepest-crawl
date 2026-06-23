@@ -1734,6 +1734,7 @@ class FetchAllRequest(BaseModel):
     q: str = ""
     reason: str = ""
     status: str = ""
+    host: str = ""
     confirm_count: int | None = None
     delay_seconds: float | None = None
     jitter_seconds: float | None = None
@@ -2283,17 +2284,21 @@ def _filter_links(
     q: str = "",
     reason: str = "",
     status: str = "",
+    host: str = "",
     results: dict[str, dict] | None = None,
 ) -> list[dict]:
     q_norm = q.strip().lower()
     reason_norm = reason.strip().lower()
     status_norm = _normalize_status_filter(status)
+    host_norm = host.strip().lower()
     ignored_ids, ignored_hosts = _load_ignored()
 
     def keep(link: dict) -> bool:
         if str(link.get("id")) in ignored_ids:
             return False
         if ignored_hosts and _host_of(link.get("url", "")).lower() in ignored_hosts:
+            return False
+        if host_norm and _host_of(link.get("url", "")).lower() != host_norm:
             return False
         if q_norm and q_norm not in str(link.get("url", "")).lower():
             return False
@@ -2306,13 +2311,30 @@ def _filter_links(
     return [link for link in links if keep(link)]
 
 
+@app.get("/links/hosts")
+async def link_hosts(limit: int = 200):
+    """Distinct hosts (excluding ignored), sorted by link count, for the host filter."""
+    ignored_ids, ignored_hosts = _load_ignored()
+    counts: dict[str, int] = {}
+    for link in _load_links():
+        if str(link.get("id")) in ignored_ids:
+            continue
+        h = _host_of(link.get("url", ""))
+        if not h or h.lower() in ignored_hosts:
+            continue
+        counts[h] = counts.get(h, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[: max(1, limit)]
+    return _json_safe({"hosts": [{"host": h, "count": c} for h, c in ranked]})
+
+
 @app.get("/links")
-async def links(limit: int = 100, offset: int = 0, q: str = "", reason: str = "", status: str = ""):
+async def links(limit: int = 100, offset: int = 0, q: str = "", reason: str = "",
+                status: str = "", host: str = ""):
     limit = max(1, min(limit, 50000))
     offset = max(0, offset)
     all_links = _load_links()
     results = _load_results_by_id()
-    filtered = _filter_links(all_links, q=q, reason=reason, status=status, results=results)
+    filtered = _filter_links(all_links, q=q, reason=reason, status=status, host=host, results=results)
     rows = []
     for link in filtered[offset: offset + limit]:
         result = results.get(str(link.get("id")), {})
@@ -2366,10 +2388,10 @@ async def fetch_all(req: FetchAllRequest):
     if req.ids:
         selected = _filter_links([by_id[i] for i in req.ids if i in by_id],
                                  q=req.q, reason=req.reason, status=req.status,
-                                 results=results)
+                                 host=req.host, results=results)
     else:
         selected = _filter_links(all_links, q=req.q, reason=req.reason,
-                                 status=req.status, results=results)
+                                 status=req.status, host=req.host, results=results)
     if req.limit:
         selected = selected[:max(0, req.limit)]
     if not selected:
