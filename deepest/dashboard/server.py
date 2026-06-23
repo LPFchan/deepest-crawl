@@ -4206,6 +4206,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             playbook_attempted.add(_normal_url_key(_wayback_original_url(current_url) or current_url))
 
     operator_updates: list[str] = []
+    traced_dialog_keys: set = set()
     try:
         _check_job_open(deadline)
         if reuse is not None:
@@ -4451,9 +4452,28 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             article_words = extracted.get("words", 0) if isinstance(extracted, dict) else 0
             viewport_text = obs.get("viewport_text", "") if isinstance(obs, dict) else ""
             page_dialogs = obs.get("dialogs", []) if isinstance(obs, dict) else []
+            for _dlg in page_dialogs:
+                if not isinstance(_dlg, dict):
+                    continue
+                _msg = _dlg.get("message") or ""
+                _key = f"{_dlg.get('type')}:{_msg}"
+                if _key not in traced_dialog_keys:
+                    traced_dialog_keys.add(_key)
+                    STATE.push_trace({"ts": _now(), "message": "page raised native dialog",
+                                      "dialog_type": _dlg.get("type"),
+                                      "dialog_message": _msg[:300],
+                                      "step": step_no})
             dialogs_line = (
-                f"Native dialogs the page raised (alert/confirm/prompt; auto-answered):\n"
+                f"\n*** NATIVE DIALOG RAISED BY THIS PAGE ***\n"
                 f"{json.dumps(page_dialogs, ensure_ascii=False)}\n"
+                f"The page popped this browser dialog (auto-answered so the tab did not freeze). "
+                f"Treat it as a strong signal about THIS page, in ANY language: a message meaning "
+                f"deleted / removed / does not exist / not found / unavailable / members-only / "
+                f"login-required indicates the requested content is GONE or BLOCKED. In that case do "
+                f"NOT summarize whatever the page then redirected to -- treat the page as content-down "
+                f"and use the Internet Archive / Wayback for the original URL (or report it "
+                f"unavailable). Only disregard the dialog if the real requested content is clearly "
+                f"present on the page.\n"
             ) if page_dialogs else ""
             user_prompt = (
                 f"--- PAGE STATE ---\n"
