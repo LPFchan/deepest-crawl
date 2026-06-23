@@ -84,6 +84,8 @@ class QueuedJob:
     url: str = ""
     label: str = ""
     cancel: threading.Event = field(default_factory=threading.Event)
+    inbox: "_queue.Queue[str]" = field(default_factory=_queue.Queue)  # live operator instructions
+    steerable: threading.Event = field(default_factory=threading.Event)  # set while a drainable loop runs
 
 
 _JOB_QUEUE: "_queue.Queue[QueuedJob]" = _queue.Queue()
@@ -831,29 +833,67 @@ def _domain_instruction_text(knowledge: dict) -> str:
     return "\n".join(lines)
 
 
-def _operator_memory_command(text: str) -> str:
+def _operator_memory_command(text: str) -> tuple[str, str]:
+    """Parse an operator domain-memory command -> (domain_hint, memory_text).
+
+    Returns ("", "") when the text is not a memory command. The optional target
+    domain is given as a slot right after the keyword ("add to domain memory for
+    anandtech: ...", bare or full host) or as a trailing host-like "for <host.tld>".
+    A trailing BARE word is NOT treated as a domain, so memory text like
+    "...wait for the banner" is preserved verbatim.
+    """
     normalized = (text or "").strip()
     match = re.match(
-        r"(?is)^\s*add\s+to\s+domain\s+(?:memory|playbook)\s*:?\s*(.+)$",
+        r"(?is)^\s*add\s+(?:to\s+)?domain\s+(?:memory|playbook|note)"
+        r"(?:\s+for\s+([A-Za-z0-9.\-]+))?\s*:?\s*(.+)$",
         normalized,
     )
     if not match:
+        return "", ""
+    domain = (match.group(1) or "").strip()
+    memory_text = match.group(2).strip()
+    if not domain:
+        trail = re.search(r"(?is)\bfor\s+([A-Za-z0-9.\-]+\.[A-Za-z]{2,})\s*$", memory_text)
+        if trail:
+            domain = trail.group(1).strip()
+            memory_text = memory_text[: trail.start()].strip()
+    return domain, memory_text
+
+
+def _normalize_domain_hint(x: str) -> str:
+    """Turn a domain hint ("anandtech", "anandtech.com", "https://x/y") into a host.
+    Does NOT use _host_of (which returns "" for scheme-less input)."""
+    h = (x or "").strip().lower()
+    h = re.sub(r"^[a-z]+://", "", h)
+    h = h.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    h = h.lstrip("@").strip(".")
+    if h.startswith("www."):
+        h = h[4:]
+    if not h:
         return ""
-    return match.group(1).strip()
+    if "." not in h:
+        h = h + ".com"
+    return h
 
 
 def _save_operator_memory_command(text: str) -> dict:
-    memory_text = _operator_memory_command(text)
+    domain_hint, memory_text = _operator_memory_command(text)
     if not memory_text:
         return {}
     explicit_url = _extract_url(memory_text) or _extract_url(text)
-    if explicit_url:
+    if domain_hint:
+        host = _normalize_domain_hint(domain_hint)
+        url = ""
+    elif explicit_url:
         host = _host_of(_wayback_original_url(explicit_url))
         url = explicit_url
     else:
         host, url = _domain_memory_target_from_state()
     if not host:
-        raise ValueError("No active domain to attach memory to.")
+        raise ValueError(
+            "No domain to attach memory to. Add 'for <host>' (e.g. 'add to domain "
+            "memory for anandtech.com: always use the internet archive')."
+        )
     data = _append_domain_note(host, "operator", memory_text, url)
     data = _append_domain_playbook(host, "operator", "Operator workaround", memory_text, url)
     if STATE.current.host in {host, "web.archive.org", ""}:
@@ -874,6 +914,37 @@ def _save_operator_memory_command(text: str) -> dict:
         "notes": data.get("notes", []),
         "playbooks": data.get("playbooks", []),
     }
+
+
+def _drain_operator_inbox(operator_updates: list, step_no: int) -> None:
+    """Absorb any live operator instructions delivered to the running job into the
+    accumulator (kept to the last 8, deduped). Safe: queue.Queue is thread-safe."""
+    job = _CURRENT_JOB
+    if job is None:
+        return
+    while True:
+        try:
+            msg = job.inbox.get_nowait()
+        except _queue.Empty:
+            break
+        msg = (msg or "").strip()
+        if msg and msg not in operator_updates:
+            operator_updates.append(msg)
+            del operator_updates[:-8]
+            STATE.push_trace({
+                "ts": _now(),
+                "message": "operator instruction received",
+                "step": step_no,
+                "text": msg[:200],
+            })
+
+
+def _operator_override_block(operator_updates: list) -> str:
+    if not operator_updates:
+        return ""
+    lines = "\n".join(f"- {u[:300]}" for u in operator_updates)
+    return ("Operator override (supersedes the original instruction — follow now):\n"
+            f"{lines}\n\n")
 
 
 def _trace(message: str, **fields) -> None:
@@ -3839,6 +3910,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
         if current_knowledge.get("playbooks") and current_url and not _is_wayback_url(current_url):
             playbook_attempted.add(_normal_url_key(_wayback_original_url(current_url) or current_url))
 
+    operator_updates: list[str] = []
     try:
         _check_job_open(deadline)
         engine = _ensure_engine(_remaining_seconds(deadline, timeout))
@@ -3863,8 +3935,11 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             _set_active_tab(engine, tab)
 
         MAX_STEPS = 20
+        if _CURRENT_JOB is not None:
+            _CURRENT_JOB.steerable.set()  # this loop can absorb live operator instructions
         for step_no in range(1, MAX_STEPS + 1):
             _check_job_open(deadline)
+            _drain_operator_inbox(operator_updates, step_no)
             # observe
             try:
                 obs = _observe_page(engine, tab)
@@ -4055,6 +4130,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 bool(knowledge.get("playbooks"))
                 and not playbook_attempted_here
                 and not _is_wayback_url(url)
+                and not operator_updates  # an operator override takes the normal path
             )
             STATE.push_trace({
                 "ts": _now(),
@@ -4071,7 +4147,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             viewport_text = obs.get("viewport_text", "") if isinstance(obs, dict) else ""
             user_prompt = (
                 f"--- PAGE STATE ---\n"
-                f"User instruction: {instruction}\n"
+                f"Original instruction: {instruction}\n"
+                f"{_operator_override_block(operator_updates)}"
                 f"Current URL: {url}\n"
                 f"Known domain workarounds:\n{knowledge_text or '- none'}\n"
                 f"Title: {obs.get('title', '')}\n"
@@ -5026,6 +5103,10 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                            STATE.current.trace, error=message)
         needs_reconnect = _is_tab_session_error(e)
     finally:
+        if _CURRENT_JOB is not None:
+            _drain_operator_inbox(operator_updates, -1)  # catch any last-moment delivery
+            with _QUEUE_LOCK:
+                _CURRENT_JOB.steerable.clear()
         if tab is not None:
             _close_job_tab(engine, tab, reason="agent job finished")
         _set_active_tab()
@@ -5185,6 +5266,22 @@ async def agent(req: AgentRequest):
     if memory_result:
         return memory_result
     initial_url = _extract_url(req.instruction)
+    # Live steering: a URL-less message while a drainable agentic loop is running is
+    # delivered to that job instead of queuing a new one. (Pasted URL => new job.)
+    if not initial_url:
+        with _QUEUE_LOCK:
+            job = _CURRENT_JOB
+            deliver = (job is not None and job.steerable.is_set()
+                       and not job.cancel.is_set())
+            if deliver:
+                job.inbox.put(req.instruction)
+        if deliver:
+            STATE.push_trace({
+                "ts": _now(),
+                "message": "operator instruction delivered to running job",
+                "text": req.instruction[:200],
+            })
+            return {"status": "delivered", "instruction": req.instruction}
     if _is_direct_crawl_instruction(req.instruction, initial_url):
         link = {
             "id": _safe_link_id(initial_url),
