@@ -13,7 +13,9 @@ const state = {
   loadingLinks: false,
   jobActive: false,
   jobLinkId: "",
-  queue: { paused: false, depth: 0, ids: [] },
+  queue: { paused: false, depth: 0, ids: [], items: [], running_item: null },
+  progress: { done: 0, total: 0 },
+  dragging: false,
   queueTotal: 0,
   queueFiltered: 0,
   queuePageSize: 50,
@@ -56,23 +58,126 @@ function setJobActive(active) {
   const changed = state.jobActive !== active;
   state.jobActive = active;
   if (!active) state.jobLinkId = "";
-  $("stop-job-btn").hidden = !active;
-  $("queue-actions").classList.toggle("idle", !active);
+  renderNowBar();
   if (changed) renderLinks();
 }
 
-function renderQueueControls() {
-  const wrap = $("queue-controls");
-  if (!wrap) return;
-  const q = state.queue || { paused: false, depth: 0, ids: [] };
-  // Count queued URLs (a batch contributes one id per selected URL), so the badge
-  // matches the per-row "queued" pills rather than the job count.
-  const n = (q.ids || []).length;
-  wrap.hidden = !(n > 0 || q.paused);
-  $("queued-count").textContent = n === 1 ? "1 queued" : `${n} queued`;
-  const btn = $("pause-btn");
-  btn.textContent = q.paused ? "Resume" : "Pause";
-  btn.classList.toggle("accent", q.paused);
+// --- Now-playing bottom bar + slide-up queue panel ---
+function renderNowBar() {
+  const bar = $("now-bar");
+  if (!bar) return;
+  const q = state.queue || {};
+  const queuedN = (q.ids || []).length;
+  const show = state.jobActive || queuedN > 0;
+  bar.hidden = !show;
+  if (!show) { hideQueuePanel(); renderQueuePanel(); return; }
+  const pp = $("now-playpause");
+  pp.textContent = q.paused ? "▶" : "⏸";
+  pp.setAttribute("aria-label", q.paused ? "Resume queue" : "Pause queue");
+  const title = state.jobActive
+    ? (state.currentUrl || (q.running_item && q.running_item.label) || "crawling…")
+    : `${queuedN} queued`;
+  $("now-title").textContent = title;
+  const p = state.progress || { done: 0, total: 0 };
+  let prog = "";
+  if (state.jobActive) prog = p.total > 0 ? `${p.done}/${p.total}` : "working…";
+  if (queuedN > 0) prog = prog ? `${prog} · ${queuedN} queued` : `${queuedN} queued`;
+  $("now-progress").textContent = prog;
+  renderQueuePanel();
+}
+
+function renderQueuePanel() {
+  const list = $("queue-panel-list");
+  const panel = $("queue-panel");
+  if (!list || !panel || panel.hidden) return;
+  if (state.dragging) return;  // don't yank the DOM out from under an active drag
+  const q = state.queue || {};
+  const rows = [];
+  if (state.jobActive && q.running_item) {
+    const now = state.currentUrl || q.running_item.label || "crawling…";
+    rows.push(`<div class="queue-row now"><span></span>` +
+      `<span class="qr-title" title="${esc(now)}">▶ ${esc(now)}</span><span></span></div>`);
+  }
+  (q.items || []).forEach((it) => {
+    const text = it.label || it.url || it.id || "";
+    rows.push(`<div class="queue-row" data-uid="${esc(it.uid)}">` +
+      `<span class="drag-handle" data-drag="1" title="Drag to reorder">⋮⋮</span>` +
+      `<span class="qr-title" title="${esc(it.url || text)}">${esc(text)}</span>` +
+      `<button class="qr-remove" type="button" data-remove="${esc(it.uid)}" aria-label="Remove">✕</button>` +
+      `</div>`);
+  });
+  list.innerHTML = rows.join("") ||
+    `<div class="queue-row" style="border:none;justify-content:center;color:var(--muted)">Queue is empty</div>`;
+}
+
+function toggleQueuePanel() {
+  const panel = $("queue-panel");
+  if (!panel) return;
+  if (panel.hidden) { panel.hidden = false; renderQueuePanel(); }
+  else panel.hidden = true;
+}
+
+function hideQueuePanel() {
+  const panel = $("queue-panel");
+  if (panel) panel.hidden = true;
+}
+
+async function postJob(path, body) {
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    addMessage("tool", String(err));
+  }
+}
+
+async function clearQueue() { hideQueuePanel(); await postJob("/jobs/clear"); }
+async function removeQueued(uid) { await postJob("/jobs/remove", { uid }); }
+async function reorderQueue(uids) { await postJob("/jobs/reorder", { uids }); }
+
+// pointer-based drag reorder within the queue panel
+let _drag = null;
+function onPanelPointerDown(event) {
+  const handle = event.target.closest("[data-drag]");
+  if (!handle) return;
+  const row = handle.closest(".queue-row[data-uid]");
+  if (!row) return;
+  event.preventDefault();
+  event.stopPropagation();  // keep the global link-drag-selection finishers out of it
+  state.dragging = true;
+  _drag = { row, pointerId: event.pointerId };
+  row.classList.add("dragging");
+  try { handle.setPointerCapture(event.pointerId); } catch (e) {}
+}
+function onPanelPointerMove(event) {
+  if (!_drag) return;
+  event.preventDefault();
+  const list = $("queue-panel-list");
+  const rows = [...list.querySelectorAll(".queue-row[data-uid]")].filter((r) => r !== _drag.row);
+  const after = rows.find((r) => {
+    const box = r.getBoundingClientRect();
+    return event.clientY < box.top + box.height / 2;
+  });
+  if (after) list.insertBefore(_drag.row, after);
+  else list.appendChild(_drag.row);
+}
+function onPanelPointerUp(event) {
+  if (!_drag) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const list = $("queue-panel-list");
+  _drag.row.classList.remove("dragging");
+  const uids = [...list.querySelectorAll(".queue-row[data-uid]")].map((r) => r.dataset.uid);
+  _drag = null;
+  state.dragging = false;
+  // optimistic: reorder state.queue.items so the reconciling SSE frame matches
+  const byUid = new Map((state.queue.items || []).map((it) => [it.uid, it]));
+  state.queue.items = uids.map((u) => byUid.get(u)).filter(Boolean);
+  reorderQueue(uids);
 }
 
 function applyTheme(theme) {
@@ -187,9 +292,10 @@ function setStatus(status, detail) {
 }
 
 function setProgress(progress) {
-  const total = progress?.total || 0;
+  state.progress = { done: progress?.done || 0, total: progress?.total || 0 };
+  const total = state.progress.total;
   // Only show progress while a job is active; "0 / 0" at idle is noise.
-  $("progress-text").textContent = total ? `${progress?.done || 0} / ${total}` : "";
+  $("progress-text").textContent = total ? `${state.progress.done} / ${total}` : "";
 }
 
 function setMode(mode) {
@@ -424,12 +530,6 @@ function renderLinks() {
             <span class="spin-stop"></span>
           </button>`
       : `<button type="button" data-fetch-id="${esc(row.id)}">Fetch</button>`;
-    const meta = [
-      row.reason || "unknown",
-      row.host || "",
-      row.mode || "",
-      row.domain_notes ? `${row.domain_notes} notes` : "",
-    ].filter(Boolean).join(" / ");
     return `
       <div class="link-row${active}${selected}${queued}" data-link-id="${esc(row.id)}">
         <div>
@@ -437,21 +537,14 @@ function renderLinks() {
           <div class="link-meta">
             <span class="pill ${cls}">${esc(label)}</span>
             ${queued ? `<span class="pill queued">queued</span>` : ""}
-            <span>${esc(meta)}</span>
           </div>
           ${row.error ? `<div class="link-error" title="${esc(row.error)}">${esc(row.error)}</div>` : ""}
         </div>
         ${control}
       </div>`;
   }).join("");
-  const start = state.queueOffset + 1;
-  const end = state.queueOffset + state.visibleLinks.length;
-  const prev = state.queueOffset > 0 ? "Scroll up for previous 50. " : "";
-  const next = end < state.queueFiltered ? "Scroll down for next 50." : "";
-  const footerText = state.queuePaging
-    ? "Loading"
-    : `Showing ${start}-${end} of ${state.queueFiltered}. ${prev}${next}`.trim();
-  list.innerHTML = rows + `<div class="list-footer">${esc(footerText)}</div>`;
+  const footerText = state.queuePaging ? "Loading…" : "";
+  list.innerHTML = rows + (footerText ? `<div class="list-footer">${esc(footerText)}</div>` : "");
   updateCrawlActionLabel();
 }
 
@@ -497,19 +590,18 @@ async function selectLink(id) {
 
 function currentQueueParams(limit, offset) {
   const q = $("link-search").value.trim();
-  const reason = $("reason-filter").value;
   const status = $("status-filter").value;
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (q) params.set("q", q);
-  if (reason) params.set("reason", reason);
   if (status) params.set("status", status);
   return params;
 }
 
 function updateQueueSummary() {
-  const start = state.visibleLinks.length ? state.queueOffset + 1 : 0;
-  const end = state.queueOffset + state.visibleLinks.length;
-  $("queue-summary").textContent = `${start}-${end} visible of ${state.queueFiltered} filtered / ${state.queueTotal} total`;
+  const el = $("link-count");
+  if (!el) return;
+  const total = state.queueFiltered || state.queueTotal || 0;
+  el.textContent = total ? `${total} URLs` : "";
 }
 
 function captureLinkScrollAnchor(list) {
@@ -604,7 +696,7 @@ async function loadLinks(offset = 0, options = {}) {
     updateQueueSummary();
   } catch (err) {
     if (replacing) state.visibleLinks = [];
-    $("queue-summary").textContent = String(err);
+    addMessage("tool", String(err));
   } finally {
     state.loadingLinks = false;
     state.queuePaging = false;
@@ -691,29 +783,6 @@ async function loadMoreIfNeeded() {
   if (state.queueOffset + state.visibleLinks.length >= state.queueFiltered) return;
   const remaining = list.scrollHeight - list.scrollTop - list.clientHeight;
   if (remaining < 120) await loadLinks(state.queueOffset + state.visibleLinks.length, { mode: "append" });
-}
-
-async function refreshLinks() {
-  const btn = $("refresh-links-btn");
-  setBusy(btn, true, "Refreshing");
-  try {
-    clearSelection();
-    const res = await fetch("/links/refresh", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    $("queue-summary").textContent = `${data.count} refreshed`;
-    addMessage("tool", `Refreshed ${data.count} Eastself URLs`);
-    await loadLinks(0);
-  } catch (err) {
-    addMessage("tool", String(err));
-    $("queue-summary").textContent = String(err);
-  } finally {
-    setBusy(btn, false, "Refresh DB");
-  }
 }
 
 function setServiceChip(id, label, ready, detail) {
@@ -892,7 +961,7 @@ async function fetchLink(id) {
 
 async function crawlAll() {
   const q = $("link-search").value.trim();
-  const reason = $("reason-filter").value;
+  const reason = "";
   const status = $("status-filter").value;
   const ids = Array.from(state.selectedIds);
   const usingSelection = ids.length > 0;
@@ -938,7 +1007,6 @@ async function crawlAll() {
 }
 
 async function cancelJob() {
-  setBusy($("stop-job-btn"), true, "Stopping");
   try {
     const res = await fetch("/jobs/cancel", {
       method: "POST",
@@ -951,8 +1019,6 @@ async function cancelJob() {
     if (data.status !== "canceling") setJobActive(false);
   } catch (err) {
     addMessage("tool", String(err));
-  } finally {
-    setTimeout(() => setBusy($("stop-job-btn"), false, "Stop"), 1000);
   }
 }
 
@@ -1080,16 +1146,30 @@ function updateState(data) {
 
   // Queue state travels on every SSE frame; re-render rows/controls only on change.
   if (data.queue) {
-    const q = { paused: !!data.queue.paused, depth: data.queue.depth || 0, ids: data.queue.ids || [] };
+    const dq = data.queue;
+    const q = {
+      paused: !!dq.paused,
+      depth: dq.depth || 0,
+      ids: dq.ids || [],
+      items: dq.items || [],
+      running_item: dq.running_item || null,
+    };
     const changed = q.paused !== state.queue.paused
       || q.depth !== state.queue.depth
-      || q.ids.join(",") !== (state.queue.ids || []).join(",");
-    if (changed) {
+      || q.ids.join(",") !== (state.queue.ids || []).join(",")
+      || q.items.map((i) => i.uid).join(",") !== (state.queue.items || []).map((i) => i.uid).join(",");
+    if (changed && !state.dragging) {
       state.queue = q;
       needsLinkRender = true;
-      renderQueueControls();
+    } else if (changed) {
+      // mid-drag: absorb non-order fields but don't disturb the panel DOM
+      state.queue.paused = q.paused;
+      state.queue.depth = q.depth;
+      state.queue.ids = q.ids;
+      state.queue.running_item = q.running_item;
     }
   }
+  renderNowBar();  // bar reflects progress/title every frame; cheap
   if (needsLinkRender) renderLinks();
 
   $("dom-text").textContent = data.dom_text || (data.mode === "vision" ? "[vision fallback]" : "-");
@@ -1117,7 +1197,6 @@ function updateState(data) {
   if (["done", "error", "idle", "canceled"].includes(data.status)) {
     setBusy($("crawl-btn"), false, "Crawl");
     setBusy($("prompt-btn"), false, "Send");
-    setBusy($("stop-job-btn"), false, "Stop");
     setJobActive(false);
     if (data.id === "crawl-all" || data.status === "canceled") {
       setBusy($("crawl-all-btn"), false, "Crawl All");
@@ -1198,18 +1277,25 @@ function bindEvents() {
   $("domain-playbook-form").addEventListener("submit", saveDomainPlaybook);
   $("copy-chat-btn").addEventListener("click", copyActivityBlocks);
   $("clear-chat-btn").addEventListener("click", clearActivity);
-  $("refresh-links-btn").addEventListener("click", refreshLinks);
   $("crawl-all-btn").addEventListener("click", crawlAll);
-  $("stop-job-btn").addEventListener("click", cancelJob);
-  $("pause-btn").addEventListener("click", togglePause);
   $("theme-toggle").addEventListener("click", toggleTheme);
   applyTheme(document.documentElement.dataset.theme);
   $("start-services-btn").addEventListener("click", startServices);
   $("brain-model-select").addEventListener("change", configureBrainModel);
-  $("reason-filter").addEventListener("change", () => {
-    clearSelection();
-    loadLinks(0);
+  // now-playing bar + queue panel
+  $("now-playpause").addEventListener("click", togglePause);
+  $("now-clear").addEventListener("click", clearQueue);
+  $("now-info").addEventListener("click", toggleQueuePanel);
+  $("queue-panel-close").addEventListener("click", hideQueuePanel);
+  const qlist = $("queue-panel-list");
+  qlist.addEventListener("click", (event) => {
+    const rm = event.target.closest("[data-remove]");
+    if (rm) { event.stopPropagation(); removeQueued(rm.dataset.remove); }
   });
+  qlist.addEventListener("pointerdown", onPanelPointerDown);
+  qlist.addEventListener("pointermove", onPanelPointerMove);
+  qlist.addEventListener("pointerup", onPanelPointerUp);
+  qlist.addEventListener("pointercancel", onPanelPointerUp);
   $("status-filter").addEventListener("change", () => {
     clearSelection();
     loadLinks(0);

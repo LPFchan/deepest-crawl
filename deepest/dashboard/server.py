@@ -23,6 +23,7 @@ import re
 import threading
 import time
 import traceback
+import uuid
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -70,7 +71,7 @@ _CANCEL_EVENT = threading.Event()
 
 
 # --- Job queue ---------------------------------------------------------------
-# A single persistent worker thread drains _JOB_QUEUE one job at a time. The
+# A single persistent worker thread drains _PENDING one job at a time. The
 # worker IS the serializer; _RUN_LOCK (still acquired inside the runners) remains
 # the canonical "a browser job is running" signal that /screenshot and
 # /services/brain read.
@@ -88,16 +89,18 @@ class QueuedJob:
     steerable: threading.Event = field(default_factory=threading.Event)  # set while a drainable loop runs
     member_ids: list = field(default_factory=list)  # per-URL link ids for a batch (fetch-all)
     done_ids: set = field(default_factory=set)  # batch members already crawled (guarded by _QUEUE_LOCK)
+    uid: str = field(default_factory=lambda: uuid.uuid4().hex)  # unique reorder/remove handle
 
 
-_JOB_QUEUE: "_queue.Queue[QueuedJob]" = _queue.Queue()
 _QUEUE_LOCK = threading.Lock()  # non-reentrant: never call _notify_queue/_refresh_queue_view while held
-_PENDING: list[QueuedJob] = []  # not-yet-running jobs, guarded by _QUEUE_LOCK
+_QUEUE_COND = threading.Condition(_QUEUE_LOCK)  # wakes the worker when _PENDING/_UNPAUSED change
+_PENDING: list[QueuedJob] = []  # the queue (single source of truth), guarded by _QUEUE_LOCK
 _CURRENT_JOB: "QueuedJob | None" = None  # guarded by _QUEUE_LOCK
 _UNPAUSED = threading.Event()
 _UNPAUSED.set()  # set = running; clear() = paused
 # Lock-free snapshot read by _serialize on the SSE hot path; rebound atomically.
-_QUEUE_VIEW: dict = {"depth": 0, "ids": [], "items": [], "paused": False, "running": ""}
+_QUEUE_VIEW: dict = {"depth": 0, "ids": [], "items": [], "paused": False,
+                     "running": "", "running_item": None}
 
 
 def _refresh_queue_view() -> None:
@@ -117,9 +120,12 @@ def _refresh_queue_view() -> None:
         view = {
             "depth": len(_PENDING),
             "ids": ids,
-            "items": [{"id": j.id, "url": j.url, "kind": j.kind, "label": j.label} for j in _PENDING],
+            "items": [{"uid": j.uid, "id": j.id, "url": j.url, "kind": j.kind, "label": j.label}
+                      for j in _PENDING],
             "paused": not _UNPAUSED.is_set(),
-            "running": _CURRENT_JOB.id if _CURRENT_JOB else "",
+            "running": cur.id if cur else "",
+            "running_item": ({"uid": cur.uid, "id": cur.id, "label": cur.label, "kind": cur.kind}
+                             if cur else None),
         }
     _QUEUE_VIEW = view  # atomic rebind; readers need no lock
 
@@ -139,11 +145,11 @@ def _enqueue(job: QueuedJob) -> str:
     means "run it again", so it queues and runs after the current one finishes.
     Otherwise a just-cancelled job stays un-retryable until its cleanup completes.
     """
-    with _QUEUE_LOCK:
+    with _QUEUE_COND:
         if job.kind == "crawl" and any(j.id == job.id for j in _PENDING):
             return "already_queued"
         _PENDING.append(job)
-    _JOB_QUEUE.put(job)
+        _QUEUE_COND.notify()  # wake the worker (notify must be inside the cond)
     _notify_queue()
     return "queued"
 
@@ -162,13 +168,16 @@ def _wait_while_paused() -> bool:
 def _job_worker() -> None:
     global _CURRENT_JOB, _CANCEL_EVENT
     while True:
-        job = _JOB_QUEUE.get()  # block for work
-        _UNPAUSED.wait()  # queue-level pause: don't START the next job while paused
-        with _QUEUE_LOCK:
-            if job in _PENDING:
-                _PENDING.remove(job)
+        with _QUEUE_COND:
+            # Wait for work AND an un-paused queue. wait(0.5) is a load-bearing
+            # backstop against a missed notify; pause holds the next job here.
+            while not (_PENDING and _UNPAUSED.is_set()):
+                _QUEUE_COND.wait(0.5)
+            job = _PENDING.pop(0)
             _CURRENT_JOB = job
             _CANCEL_EVENT = job.cancel  # rebind so Stop targets exactly this job
+        # NOTE: _refresh_queue_view acquires _QUEUE_LOCK, so it MUST be outside the
+        # cond block above (the lock is non-reentrant).
         _refresh_queue_view()
         # Clear the prior job's terminal frame during the engine/tab-setup gap before
         # the runner emits its own "queued" frame. status must be NON-terminal.
@@ -188,7 +197,6 @@ def _job_worker() -> None:
             with _QUEUE_LOCK:
                 _CURRENT_JOB = None
             _notify_queue()
-            _JOB_QUEUE.task_done()
 _SERVICE_STATE = {"status": "idle", "note": "", "error": ""}
 _LINKS_CACHE = {"mtime": None, "data": []}
 _RESULTS_CACHE = {"mtime": None, "data": {}}
@@ -1711,6 +1719,14 @@ class RefreshLinksRequest(BaseModel):
     limit: int | None = None
 
 
+class QueueOrderRequest(BaseModel):
+    uids: list[str] = []
+
+
+class QueueItemRequest(BaseModel):
+    uid: str
+
+
 class DomainNoteRequest(BaseModel):
     url: str = ""
     host: str = ""
@@ -2371,9 +2387,45 @@ async def pause_queue():
 
 @app.post("/jobs/resume")
 async def resume_queue():
-    _UNPAUSED.set()
+    with _QUEUE_COND:
+        _UNPAUSED.set()
+        _QUEUE_COND.notify()  # wake the worker that's parked on the pause predicate
     _notify_queue()
     return {"status": "running"}
+
+
+@app.post("/jobs/reorder")
+async def reorder_queue(req: QueueOrderRequest):
+    order = {uid: i for i, uid in enumerate(req.uids or [])}
+    with _QUEUE_LOCK:
+        # stable: known uids take the requested order; any not listed keep their
+        # relative position at the end. Never touches _CURRENT_JOB (already popped).
+        _PENDING.sort(key=lambda j: order.get(j.uid, len(order) + 1))
+    _notify_queue()
+    return {"status": "reordered"}
+
+
+@app.post("/jobs/remove")
+async def remove_queued(req: QueueItemRequest):
+    with _QUEUE_LOCK:
+        before = len(_PENDING)
+        _PENDING[:] = [j for j in _PENDING if j.uid != req.uid]
+        removed = before - len(_PENDING)
+    _notify_queue()
+    return {"status": "removed", "count": removed}
+
+
+@app.post("/jobs/clear")
+async def clear_queue():
+    with _QUEUE_LOCK:
+        _PENDING.clear()
+        job = _CURRENT_JOB
+    if job is not None:
+        job.cancel.set()  # mirror /jobs/cancel: per-job token, no _CANCEL_EVENT clear
+        _close_active_tab()
+        STATE.update(status="canceling", note="Queue cleared; stopping current job.")
+    _notify_queue()
+    return {"status": "cleared"}
 
 
 @app.post("/links/refresh")

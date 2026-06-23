@@ -48,34 +48,18 @@
 
     <main class="workspace">
       <section class="queue-pane">
-        <div class="pane-head">
-          <div>
-            <h2>Uncrawlable URLs</h2>
-            <p id="queue-summary">loading</p>
-          </div>
-          <button class="secondary" id="refresh-links-btn" type="button">Refresh DB</button>
-        </div>
         <div class="toolbar">
           <input type="search" id="link-search" placeholder="Filter URLs">
-          <select id="reason-filter" aria-label="Reason">
-            <option value="">All reasons</option>
-            <option value="unretrievable">unretrievable</option>
-            <option value="needs_deep_crawl">needs_deep_crawl</option>
-          </select>
           <select id="status-filter" aria-label="Status">
-            <option value="">All statuses</option>
+            <option value="">All</option>
             <option value="pending">pending</option>
             <option value="failed">failed</option>
             <option value="success">success</option>
           </select>
         </div>
-        <div class="queue-actions idle" id="queue-actions">
+        <div class="queue-pane-action">
           <button id="crawl-all-btn" class="accent" type="button">Crawl All</button>
-          <button id="stop-job-btn" class="danger secondary" type="button" hidden>Stop</button>
-        </div>
-        <div class="queue-controls" id="queue-controls" hidden>
-          <span id="queued-count" class="queued-count">0 queued</span>
-          <button id="pause-btn" class="secondary" type="button">Pause</button>
+          <span id="link-count" class="link-count"></span>
         </div>
         <div class="link-list" id="link-list"></div>
       </section>
@@ -143,6 +127,23 @@
         </form>
       </section>
     </main>
+
+    <div class="queue-panel" id="queue-panel" hidden>
+      <div class="queue-panel-head">
+        <span>Queue</span>
+        <button class="icon-btn secondary" id="queue-panel-close" type="button" aria-label="Hide queue">▾</button>
+      </div>
+      <div class="queue-panel-list" id="queue-panel-list"></div>
+    </div>
+
+    <footer class="now-bar" id="now-bar" hidden>
+      <button class="icon-btn now-playpause" id="now-playpause" type="button" aria-label="Pause queue">⏸</button>
+      <button class="now-info" id="now-info" type="button" title="Show queue">
+        <span class="now-title" id="now-title">—</span>
+        <span class="now-progress" id="now-progress"></span>
+      </button>
+      <button class="icon-btn danger now-clear" id="now-clear" type="button" title="Clear queue and stop" aria-label="Clear queue and stop">✕</button>
+    </footer>
   </div>
 
   <script src="/app.js"></script>
