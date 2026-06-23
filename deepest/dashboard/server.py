@@ -3523,7 +3523,8 @@ def _observe_page(engine, tab) -> dict:
       w: innerWidth,
       h: innerHeight,
       pageH: document.documentElement.scrollHeight
-    }
+    },
+    dialogs: (window.__deepestDialogs || []).slice(-10)
   };
 })()
 """
@@ -4395,6 +4396,11 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             article_source = extracted.get("source", "") if isinstance(extracted, dict) else ""
             article_words = extracted.get("words", 0) if isinstance(extracted, dict) else 0
             viewport_text = obs.get("viewport_text", "") if isinstance(obs, dict) else ""
+            page_dialogs = obs.get("dialogs", []) if isinstance(obs, dict) else []
+            dialogs_line = (
+                f"Native dialogs the page raised (alert/confirm/prompt; auto-answered):\n"
+                f"{json.dumps(page_dialogs, ensure_ascii=False)}\n"
+            ) if page_dialogs else ""
             user_prompt = (
                 f"--- PAGE STATE ---\n"
                 f"Original instruction: {instruction}\n"
@@ -4402,6 +4408,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 f"Current URL: {url}\n"
                 f"Known domain workarounds:\n{knowledge_text or '- none'}\n"
                 f"Title: {obs.get('title', '')}\n"
+                f"{dialogs_line}"
                 f"Scroll: {json.dumps(obs.get('scroll', {}), ensure_ascii=False)}\n"
                 f"Transient verification: {verification_reason or 'none'}\n"
                 f"Content-down reason: {down_reason or 'none'}\n"

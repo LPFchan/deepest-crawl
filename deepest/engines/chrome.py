@@ -146,6 +146,37 @@ class RealChromeEngine(BrowserEngine):
             finally:
                 self._client = None
 
+    # Native JS dialogs (alert/confirm/prompt) open an OS-level modal that freezes the
+    # page's JS thread and carries text that never reaches the DOM, so the observer is
+    # blind to it. Wrap them in-page to record the message and auto-answer (alert ->
+    # undefined, confirm -> true, prompt -> default) instead of blocking.
+    _DIALOG_CAPTURE_JS = (
+        "(()=>{if(window.__deepestDialogHook)return;window.__deepestDialogHook=true;"
+        "window.__deepestDialogs=[];"
+        "var rec=function(t,m){try{window.__deepestDialogs.push({type:t,"
+        "message:String(m==null?'':m)});"
+        "if(window.__deepestDialogs.length>20)window.__deepestDialogs.shift();}catch(e){}};"
+        "window.alert=function(m){rec('alert',m);};"
+        "window.confirm=function(m){rec('confirm',m);return true;};"
+        "window.prompt=function(m,d){rec('prompt',m);return d==null?'':d;};})()"
+    )
+
+    def _install_dialog_capture(self, tab: TabHandle) -> None:
+        """Register the dialog wrapper before navigation (so it applies to the document
+        being loaded and any child frames) and also inject it into whatever is already
+        loaded, for adopted tabs. Page.enable first: addScriptToEvaluateOnNewDocument is
+        a Page-domain command and is rejected until the domain is enabled (idempotent).
+        Best-effort: never let this break tab setup."""
+        for method, params in (
+            ("Page.enable", {}),
+            ("Page.addScriptToEvaluateOnNewDocument", {"source": self._DIALOG_CAPTURE_JS}),
+            ("Runtime.evaluate", {"expression": self._DIALOG_CAPTURE_JS}),
+        ):
+            try:
+                self.cdp(tab, method, params)
+            except Exception:
+                pass
+
     # ---- tabs ----
     def new_tab(self, url: str | None = None) -> TabHandle:
         with self._lock:
@@ -154,6 +185,7 @@ class RealChromeEngine(BrowserEngine):
             tab_id = created["id"] if isinstance(created, dict) else created
             c.attach(tab_id)
             handle = TabHandle(id=tab_id, backend=self.name)
+            self._install_dialog_capture(handle)
             if url:
                 self.navigate(handle, url)
             return handle
@@ -165,7 +197,9 @@ class RealChromeEngine(BrowserEngine):
             c = self._c()
             c.claim_user_tab(tab_id)
             c.attach(tab_id)
-            return TabHandle(id=tab_id, backend=self.name)
+            handle = TabHandle(id=tab_id, backend=self.name)
+            self._install_dialog_capture(handle)
+            return handle
 
     def current_url(self, tab: TabHandle) -> str:
         """Resolve the tab URL from the browser-level target list (CDP Target domain),
