@@ -1042,6 +1042,18 @@ def _set_active_tab(engine=None, tab=None) -> None:
             _JOB_TABS.add(tid)  # track for end-of-job cleanup (covers reconnect orphans)
 
 
+def _bring_tab_to_front(engine, tab) -> None:
+    """Foreground the job's tab in the host Chrome so a launched job is actually
+    visible instead of opening behind other tabs. Best-effort; never fails the job."""
+    if engine is None or tab is None:
+        return
+    try:
+        engine.cdp(tab, "Page.bringToFront")
+    except Exception as exc:
+        STATE.push_trace({"ts": _now(), "message": "bring tab to front failed",
+                          "error": f"{type(exc).__name__}: {exc}"})
+
+
 def _close_job_tabs(engine, *, reason: str = "job cleanup",
                     before_ids: set | None = None) -> None:
     """Close every tab the job touched (current + any orphaned by mid-job reconnects),
@@ -1577,6 +1589,7 @@ def _adopt_spawned_content_tab(engine, tab, url: str, before_ids: set,
     STATE.push_trace(trace)
     _close_job_tab(engine, tab, reason="stranded opener after new-tab redirect")
     _set_active_tab(engine, new_tab)
+    _bring_tab_to_front(engine, new_tab)
     return engine, new_tab
 
 
@@ -2012,6 +2025,7 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
             deadline,
         )
         _set_active_tab(engine, tab)
+        _bring_tab_to_front(engine, tab)
         _job_sleep(2, deadline)
         engine, tab = _adopt_spawned_content_tab(
             engine, tab, url, pre_open_tab_ids, timeout, deadline,
@@ -4112,6 +4126,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
         pre_open_tab_ids = _snapshot_tab_ids(engine)
         engine, tab = _new_tab_with_retry(engine, None, timeout, deadline)
         _set_active_tab(engine, tab)
+        _bring_tab_to_front(engine, tab)
         engine.cdp(tab, "Page.enable")
         bh = engine.activate(tab)
         if initial_url:
