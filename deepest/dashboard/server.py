@@ -263,6 +263,13 @@ def _screenshot_timeout_seconds() -> float:
     return _env_float("DEEPEST_SCREENSHOT_TIMEOUT_SECONDS", 1.5)
 
 
+def _summary_reserve_seconds() -> float:
+    """Dedicated wall-clock budget for the final summary, so a step loop that
+    exhausted the job deadline can't starve it. Cancellation still uses the real
+    job deadline (via _check_job_open), so this only governs the summary timeout."""
+    return _env_float("DEEPEST_SUMMARY_RESERVE_SECONDS", 60.0)
+
+
 def _env_enabled(name: str, default: bool = True) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -915,38 +922,62 @@ def _close_active_tab() -> None:
         engine = _ACTIVE_JOB.get("engine")
         tab = _ACTIVE_JOB.get("tab")
     if engine is not None and tab is not None:
-        _close_job_tab(engine, tab, reason="active job cleanup")
+        # Called from the cancel endpoint while the worker thread may still be
+        # using the engine, so do NOT reconnect the transport here; the job's own
+        # finally does the authoritative (reconnect-capable) close.
+        _close_job_tab(engine, tab, reason="active job cleanup", allow_reconnect=False)
 
 
-def _close_job_tab(engine, tab, *, reason: str = "job cleanup") -> None:
+# Errors meaning the tab is genuinely gone (nothing left to close).
+_TAB_GONE_ERRORS = ("No tab with id", "No target with given id", "Target closed")
+# Errors meaning our debugger session lost the tab, but the tab is likely still
+# open in Chrome — reconnect and re-adopt it to actually close it.
+_TAB_SESSION_LOST_ERRORS = (
+    "not part of browser session",
+    "Debugger unattached",
+    "unexpected response id",
+)
+
+
+def _close_job_tab(engine, tab, *, reason: str = "job cleanup",
+                   allow_reconnect: bool = True) -> None:
     if engine is None or tab is None:
         return
-    benign_errors = (
-        "Debugger unattached",
-        "No tab with id",
-        "not part of browser session",
-        "No target with given id",
-        "Target closed",
-    )
+    tab_id = getattr(tab, "id", "")
     try:
         engine.cdp(tab, "Page.close", {})
-        STATE.push_trace({
-            "ts": _now(),
-            "message": "closed browser tab",
-            "reason": reason,
-            "tab": getattr(tab, "id", ""),
-        })
+        STATE.push_trace({"ts": _now(), "message": "closed browser tab",
+                          "reason": reason, "tab": tab_id})
+        return
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        message = "browser tab close failed"
-        if any(item in error for item in benign_errors):
-            message = "browser tab already closed or detached"
+    if any(item in error for item in _TAB_GONE_ERRORS):
+        STATE.push_trace({"ts": _now(), "message": "browser tab already closed",
+                          "reason": reason, "tab": tab_id, "error": error})
+        return
+    session_lost = any(item in error for item in _TAB_SESSION_LOST_ERRORS)
+    if not (session_lost and allow_reconnect):
+        STATE.push_trace({"ts": _now(), "message": "browser tab close failed",
+                          "reason": reason, "tab": tab_id, "error": error})
+        return
+    # The tab is still open but our session can't reach it (the shared debugger
+    # detached). Reconnect to a fresh session, re-adopt the tab, and close it.
+    try:
+        engine = _reconnect_engine()
+        engine.claim_tab(tab_id)
+        engine.cdp(tab, "Page.close", {})
+        STATE.push_trace({"ts": _now(), "message": "closed browser tab after reconnect",
+                          "reason": reason, "tab": tab_id})
+    except Exception as exc2:
+        error2 = f"{type(exc2).__name__}: {exc2}"
+        gone = any(item in error2 for item in _TAB_GONE_ERRORS)
         STATE.push_trace({
             "ts": _now(),
-            "message": message,
+            "message": "browser tab already closed" if gone else "browser tab close failed after reconnect",
             "reason": reason,
-            "tab": getattr(tab, "id", ""),
-            "error": error,
+            "tab": tab_id,
+            "error": error2,
+            "first_error": error,
         })
 
 
@@ -1245,6 +1276,17 @@ def _is_real_content_url(url: str) -> bool:
     return (url or "").strip().lower().startswith(("http://", "https://"))
 
 
+# http(s) URLs that still can't be driven via the debugger (e.g. Chrome's built-in
+# PDF viewer), so a spawned tab pointing at one must not be adopted.
+_NON_ATTACHABLE_SUFFIXES = (".pdf",)
+
+
+def _is_attachable_content_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    path = u.split("?", 1)[0].split("#", 1)[0]
+    return _is_real_content_url(u) and not path.endswith(_NON_ATTACHABLE_SUFFIXES)
+
+
 def _snapshot_tab_ids(engine) -> set:
     """Capture the engine's known tab ids so newly spawned tabs can be detected."""
     ids: set = set()
@@ -1291,7 +1333,7 @@ def _find_spawned_content_tab(engine, opener_tab, before_ids: set, original_url:
             if tid in before_ids or tid == opener_id:
                 continue
             tab_url = str(tab.get("url", ""))
-            if not _is_real_content_url(tab_url):
+            if not _is_attachable_content_url(tab_url):
                 continue
             candidates.append((tid, tab_url))
     if not candidates:
@@ -1323,16 +1365,29 @@ def _adopt_spawned_content_tab(engine, tab, url: str, before_ids: set,
     spawned_id, spawned_url = _find_spawned_content_tab(engine, tab, before_ids, url)
     if spawned_id is None:
         return engine, tab
+    new_tab = None
     try:
         new_tab = engine.claim_tab(int(spawned_id))
     except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        # "Cannot attach to this target" can be transient (the spawned tab is still
+        # settling). Retry once after a brief, cancel-aware pause before giving up.
+        if "Cannot attach" in error:
+            _cancelable_sleep(0.5)
+            try:
+                new_tab = engine.claim_tab(int(spawned_id))
+            except Exception as exc2:
+                error = f"{type(exc2).__name__}: {exc2}"
+    if new_tab is None:
+        non_attachable = "Cannot attach" in error
         trace = {
             "ts": _now(),
-            "message": "failed to adopt spawned content tab",
+            "message": ("spawned tab is not attachable; staying on opener"
+                        if non_attachable else "failed to adopt spawned content tab"),
             "reason": reason,
             "spawned_tab": spawned_id,
             "spawned_url": spawned_url,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": error,
         }
         if step_no is not None:
             trace["step"] = step_no
@@ -1352,6 +1407,34 @@ def _adopt_spawned_content_tab(engine, tab, url: str, before_ids: set,
     _close_job_tab(engine, tab, reason="stranded opener after new-tab redirect")
     _set_active_tab(engine, new_tab)
     return engine, new_tab
+
+
+def _seam_with_recovery(engine, tab, fn, *, replay: bool):
+    """Run fn(engine, tab) at the CDP seam, recovering from a tab-session detach.
+
+    On a session-lost error (Debugger unattached / not part of browser session) the
+    shared debugger lost the tab while it is still open. Reconnect to a fresh session
+    (same as _reconnect_engine elsewhere), re-adopt the tab, and re-run fn ONLY if
+    replay=True. Never replay non-idempotent input: a delivered-but-unacked click must
+    not double-fire, so callers dispatching Input.* pass replay=False and re-observe.
+    Returns (engine, tab, result, recovered). Non-detach / 'tab gone' errors propagate.
+    """
+    try:
+        return engine, tab, fn(engine, tab), False
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        if not any(s in error for s in _TAB_SESSION_LOST_ERRORS):
+            raise
+    STATE.push_trace({
+        "ts": _now(),
+        "message": "recovering tab session at CDP seam",
+        "error": error,
+        "replay": replay,
+    })
+    engine = _reconnect_engine()
+    tab = engine.claim_tab(getattr(tab, "id", tab))
+    _set_active_tab(engine, tab)
+    return engine, tab, (fn(engine, tab) if replay else None), True
 
 
 def _perceive_with_tab_recovery(engine, tab, url: str, timeout_seconds: float,
@@ -1856,20 +1939,24 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
         _publish_screenshot(engine, tab, "pre-summary browser screenshot")
         try:
             _trace("checking local brain")
-            brain = _ensure_brain(_remaining_seconds(deadline, timeout))
+            # Reserve a dedicated budget for the final summary (the step loop above
+            # may have spent the job deadline). _check_job_open(deadline) above already
+            # honored cancellation on the real job deadline.
+            summary_deadline = time.monotonic() + _summary_reserve_seconds()
+            brain = _ensure_brain(_remaining_seconds(summary_deadline, timeout))
             if p.mode == "vision" and p.image_png:
                 summary = _call_brain_with_retry(
                     lambda call_timeout: brain.summarize_image(
                         url, p.image_png, timeout=call_timeout
                     ),
-                    deadline, timeout, "image summary",
+                    summary_deadline, timeout, "image summary",
                 )
             else:
                 summary = _call_brain_with_retry(
                     lambda call_timeout: brain.summarize_text(
                         url, p.text or "", timeout=call_timeout
                     ),
-                    deadline, timeout, "text summary",
+                    summary_deadline, timeout, "text summary",
                 )
         except Exception as brain_exc:
             if not (p.text or "").strip():
@@ -4275,6 +4362,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                             "extractor": (obs.get("extracted") or {}).get("source", ""),
                         })
                         try:
+                            summary_deadline = time.monotonic() + _summary_reserve_seconds()
                             refined = _call_brain_with_retry(
                                 lambda call_timeout: brain.summarize_text(
                                     f"agent-extracted-summary-{step_no}",
@@ -4286,7 +4374,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                                     max_tokens=_agent_brain_max_tokens(),
                                     timeout=call_timeout,
                                 ),
-                                deadline, timeout, "agent extracted summary",
+                                summary_deadline, timeout, "agent extracted summary",
                             )
                             refined = _clean_final_summary(refined)
                             refined_verification = _verify_summary_candidate(
@@ -4547,7 +4635,10 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 })
                 if action["by"] == "xy":
                     cx, cy = _vision_xy_to_css(engine, tab, action["x"], action["y"])
-                    _click_xy(engine, tab, cx, cy)
+                    # replay=False: a detached click must not double-fire; on recovery
+                    # we re-adopt the tab and re-observe next step instead of re-clicking.
+                    engine, tab, _, _ = _seam_with_recovery(
+                        engine, tab, lambda e, t: _click_xy(e, t, cx, cy), replay=False)
                     _job_sleep(2, deadline)
                     continue
                 if action["by"] == "text":
@@ -4602,7 +4693,13 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                 })
                 if action.get("by") == "xy":
                     cx, cy = _vision_xy_to_css(engine, tab, action["x"], action["y"])
-                    _click_xy(engine, tab, cx, cy)
+                    engine, tab, _, recovered = _seam_with_recovery(
+                        engine, tab, lambda e, t: _click_xy(e, t, cx, cy), replay=False)
+                    if recovered:
+                        # the click's focus is uncertain after a re-adopt; re-observe
+                        # rather than type blindly into the wrong element.
+                        _job_sleep(0.2, deadline)
+                        continue
                     _job_sleep(0.2, deadline)
                     _type_text(engine, tab, action["text"])
                 elif action.get("by") == "text":
@@ -4700,6 +4797,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                         "content_words": _word_count(content),
                     })
                     try:
+                        summary_deadline = time.monotonic() + _summary_reserve_seconds()
                         summary = _call_brain_with_retry(
                             lambda call_timeout: brain.summarize_text(
                                 f"agent-scroll-stall-{step_no}",
@@ -4710,7 +4808,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                                 max_tokens=_agent_brain_max_tokens(),
                                 timeout=call_timeout,
                             ),
-                            deadline, timeout, "agent scroll-stall summary",
+                            summary_deadline, timeout, "agent scroll-stall summary",
                         )
                         summary = _clean_final_summary(summary)
                     except Exception as exc:
@@ -4873,19 +4971,20 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
             if action["action"] == "extract":
                 from ..perception.policy import perceive
                 p = perceive(engine, tab, url)
+                summary_deadline = time.monotonic() + _summary_reserve_seconds()
                 if p.mode == "vision":
                     summary = _call_brain_with_retry(
                         lambda call_timeout: brain.summarize_image(
                             url, p.image_png, timeout=call_timeout
                         ),
-                        deadline, timeout, "agent image extract",
+                        summary_deadline, timeout, "agent image extract",
                     )
                 else:
                     summary = _call_brain_with_retry(
                         lambda call_timeout: brain.summarize_text(
                             url, p.text or "", timeout=call_timeout
                         ),
-                        deadline, timeout, "agent text extract",
+                        summary_deadline, timeout, "agent text extract",
                     )
                 STATE.update(mode=p.mode, dom_text=p.text or "", response=summary,
                              status="done")
