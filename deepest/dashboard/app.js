@@ -135,7 +135,14 @@ async function postJob(path, body) {
   }
 }
 
-async function clearQueue() { hideQueuePanel(); await postJob("/jobs/clear"); }
+async function clearQueue() {
+  hideQueuePanel();
+  // Optimistically drop the queue so the count/bar reset on click; the running job
+  // cancels cooperatively and SSE confirms. (Server zeroes a canceling batch too.)
+  if (state.queue) { state.queue.items = []; state.queue.ids = []; state.queue.depth = 0; }
+  renderNowBar();
+  await postJob("/jobs/clear");
+}
 async function removeQueued(uid) { await postJob("/jobs/remove", { uid }); }
 async function reorderQueue(uids) { await postJob("/jobs/reorder", { uids }); }
 

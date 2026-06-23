@@ -116,7 +116,10 @@ def _refresh_queue_view() -> None:
         for j in _PENDING:
             ids.extend(j.member_ids or [j.id])
         cur = _CURRENT_JOB
-        if cur is not None and cur.kind == "fetch-all":
+        # A canceling batch contributes nothing to the queued count: its remaining
+        # members will not be crawled, so /jobs/clear and /jobs/cancel zero the count
+        # immediately instead of after the job finishes unwinding.
+        if cur is not None and cur.kind == "fetch-all" and not cur.cancel.is_set():
             ids.extend(m for m in cur.member_ids if m not in cur.done_ids)
         view = {
             "depth": len(_PENDING),
@@ -1039,17 +1042,28 @@ def _set_active_tab(engine=None, tab=None) -> None:
             _JOB_TABS.add(tid)  # track for end-of-job cleanup (covers reconnect orphans)
 
 
-def _close_job_tabs(engine, *, reason: str = "job cleanup") -> None:
+def _close_job_tabs(engine, *, reason: str = "job cleanup",
+                    before_ids: set | None = None) -> None:
     """Close every tab the job touched (current + any orphaned by mid-job reconnects),
     then clear the active-tab/tracking state. Uses the current (healthy) session: a tab
-    it still owns closes directly; one orphaned by a dead session is re-adopted then closed."""
+    it still owns closes directly; one orphaned by a dead session is re-adopted then closed.
+
+    When before_ids (the pre-job tab snapshot) is given, also sweep any tab that appeared
+    during the job but never reached _JOB_TABS: healthy-opener popups, spawned tabs whose
+    adoption failed, and transient double-opens. The job owns the browser for its run, so a
+    tab absent from the snapshot is a job-spawned orphan no matter how it was opened."""
     with _ACTIVE_JOB_LOCK:
-        ids = list(_JOB_TABS)
+        ids = set(_JOB_TABS)
         _JOB_TABS.clear()
         _ACTIVE_JOB["engine"] = None
         _ACTIVE_JOB["tab"] = None
     if engine is None:
         return
+    if before_ids is not None:
+        try:
+            ids.update(tid for tid in _snapshot_tab_ids(engine) if tid not in before_ids)
+        except Exception:
+            pass
     closed = 0
     for tid in ids:
         th = TabHandle(id=tid, backend=getattr(engine, "name", "chrome"))
@@ -1981,6 +1995,7 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
     tab = None
     brain = None
     needs_reconnect = False
+    pre_open_tab_ids = None
     try:
         _check_job_open(deadline)
         _trace("connecting to real Chrome transport")
@@ -2188,8 +2203,8 @@ def _do_crawl(link_or_url, timeout_seconds: float | None = None):
                     "message": "Chrome transport reconnect failed",
                     "error": f"{type(reconnect_exc).__name__}: {reconnect_exc}",
                 })
-        # Close the current tab AND any orphaned by mid-job reconnects.
-        _close_job_tabs(engine, reason="crawl job finished")
+        # Close the current tab AND any orphaned by mid-job reconnects or untracked spawns.
+        _close_job_tabs(engine, reason="crawl job finished", before_ids=pre_open_tab_ids)
 
 
 def _do_prompt(text: str):
@@ -4071,6 +4086,7 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
     tab = None
     brain = None
     needs_reconnect = False
+    pre_open_tab_ids = None
     last_url = ""
     last_host = ""
     last_dom = ""
@@ -5301,8 +5317,8 @@ def _do_agentic(instruction: str, initial_url: str = "", timeout_seconds: float 
                     "message": "Chrome transport reconnect failed",
                     "error": f"{type(reconnect_exc).__name__}: {reconnect_exc}",
                 })
-        # Close the current tab AND any orphaned by mid-job reconnects.
-        _close_job_tabs(engine, reason="agent job finished")
+        # Close the current tab AND any orphaned by mid-job reconnects or untracked spawns.
+        _close_job_tabs(engine, reason="agent job finished", before_ids=pre_open_tab_ids)
 
 
 def _run_agentic_job(instruction: str, initial_url: str = "", timeout_seconds: float | None = None) -> None:
