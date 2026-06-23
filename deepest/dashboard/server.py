@@ -89,6 +89,7 @@ class QueuedJob:
     inbox: "_queue.Queue[str]" = field(default_factory=_queue.Queue)  # live operator instructions
     steerable: threading.Event = field(default_factory=threading.Event)  # set while a drainable loop runs
     member_ids: list = field(default_factory=list)  # per-URL link ids for a batch (fetch-all)
+    member_items: list = field(default_factory=list)  # [{id,url}] per batch member, for the queue panel
     done_ids: set = field(default_factory=set)  # batch members already crawled (guarded by _QUEUE_LOCK)
     uid: str = field(default_factory=lambda: uuid.uuid4().hex)  # unique reorder/remove handle
 
@@ -119,8 +120,12 @@ def _refresh_queue_view() -> None:
         # A canceling batch contributes nothing to the queued count: its remaining
         # members will not be crawled, so /jobs/clear and /jobs/cancel zero the count
         # immediately instead of after the job finishes unwinding.
+        running_members: list = []
         if cur is not None and cur.kind == "fetch-all" and not cur.cancel.is_set():
             ids.extend(m for m in cur.member_ids if m not in cur.done_ids)
+            # Per-URL rows so the queue panel can list (and scroll) a running batch,
+            # not just the one in-flight URL.
+            running_members = [m for m in cur.member_items if m.get("id") not in cur.done_ids]
         view = {
             "depth": len(_PENDING),
             "ids": ids,
@@ -130,6 +135,7 @@ def _refresh_queue_view() -> None:
             "running": cur.id if cur else "",
             "running_item": ({"uid": cur.uid, "id": cur.id, "label": cur.label, "kind": cur.kind}
                              if cur else None),
+            "running_members": running_members,
         }
     _QUEUE_VIEW = view  # atomic rebind; readers need no lock
 
@@ -2481,6 +2487,8 @@ async def fetch_all(req: FetchAllRequest):
         id="crawl-all",
         label=f"{len(selected)} URLs",
         member_ids=[str(l.get("id")) for l in selected if l.get("id")],
+        member_items=[{"id": str(l.get("id")), "url": l.get("url", "")}
+                      for l in selected if l.get("id")],
     ))
     return {
         "status": status,

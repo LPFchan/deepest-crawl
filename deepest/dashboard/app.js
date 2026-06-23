@@ -13,7 +13,7 @@ const state = {
   loadingLinks: false,
   jobActive: false,
   jobLinkId: "",
-  queue: { paused: false, depth: 0, ids: [], items: [], running_item: null },
+  queue: { paused: false, depth: 0, ids: [], items: [], running_item: null, running_members: [] },
   progress: { done: 0, total: 0 },
   dragging: false,
   queueTotal: 0,
@@ -93,7 +93,18 @@ function renderQueuePanel() {
   if (state.dragging) return;  // don't yank the DOM out from under an active drag
   const q = state.queue || {};
   const rows = [];
-  if (state.jobActive && q.running_item) {
+  const members = (state.jobActive && q.running_members) ? q.running_members : [];
+  if (members.length) {
+    // A running batch: list every remaining URL so the queue is scrollable, with ▶
+    // marking the one currently in flight.
+    members.forEach((m) => {
+      const isNow = (m.url && m.url === state.currentUrl) || (m.id && m.id === state.jobLinkId);
+      const text = m.url || m.id || "";
+      rows.push(`<div class="queue-row${isNow ? " now" : ""}">` +
+        `<span>${isNow ? "▶" : ""}</span>` +
+        `<span class="qr-title" title="${esc(text)}">${esc(text)}</span><span></span></div>`);
+    });
+  } else if (state.jobActive && q.running_item) {
     const now = state.currentUrl || q.running_item.label || "crawling…";
     rows.push(`<div class="queue-row now"><span></span>` +
       `<span class="qr-title" title="${esc(now)}">▶ ${esc(now)}</span><span></span></div>`);
@@ -106,8 +117,13 @@ function renderQueuePanel() {
       `<button class="qr-remove" type="button" data-remove="${esc(it.uid)}" aria-label="Remove">✕</button>` +
       `</div>`);
   });
-  list.innerHTML = rows.join("") ||
+  const html = rows.join("") ||
     `<div class="queue-row" style="border:none;justify-content:center;color:var(--muted)">Queue is empty</div>`;
+  // renderQueuePanel runs every SSE frame; only touch the DOM when content actually
+  // changes so an open panel stays scrollable instead of resetting to the top.
+  if (html === list.dataset.sig) return;
+  list.dataset.sig = html;
+  list.innerHTML = html;
 }
 
 function toggleQueuePanel() {
@@ -139,7 +155,7 @@ async function clearQueue() {
   hideQueuePanel();
   // Optimistically drop the queue so the count/bar reset on click; the running job
   // cancels cooperatively and SSE confirms. (Server zeroes a canceling batch too.)
-  if (state.queue) { state.queue.items = []; state.queue.ids = []; state.queue.depth = 0; }
+  if (state.queue) { state.queue.items = []; state.queue.ids = []; state.queue.depth = 0; state.queue.running_members = []; }
   renderNowBar();
   await postJob("/jobs/clear");
 }
@@ -1252,6 +1268,7 @@ function updateState(data) {
       ids: dq.ids || [],
       items: dq.items || [],
       running_item: dq.running_item || null,
+      running_members: dq.running_members || [],
     };
     const changed = q.paused !== state.queue.paused
       || q.depth !== state.queue.depth
@@ -1266,6 +1283,7 @@ function updateState(data) {
       state.queue.depth = q.depth;
       state.queue.ids = q.ids;
       state.queue.running_item = q.running_item;
+      state.queue.running_members = q.running_members;
     }
   }
   renderNowBar();  // bar reflects progress/title every frame; cheap
