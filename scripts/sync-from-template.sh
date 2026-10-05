@@ -1,8 +1,6 @@
 #!/bin/bash
-# Self-sync the manifest and AGENTS.md managed section; preserve project records.
-# The caller owns the commit. SYNC-CHANGED reports whether files changed.
-# Keep the v2.0.x managed-loop byte boundary stable for in-place legacy upgrades.
-#---------------------------------------------------------
+#---------------------------------
+# Preserve the v2.0.x managed-loop byte boundary.
 
 set -eu
 
@@ -18,6 +16,7 @@ SCAFFOLD="$TMP/template/scaffold"
 MANIFEST="$SCAFFOLD/manifest.txt"
 VERSION=$(sed -n 's/^\*\*Template version: \(.*\)\*\*/\1/p' "$SCAFFOLD/records/REPO.md" | head -1)
 [ -n "$VERSION" ] || { echo "could not read Template version" >&2; exit 1; }
+python3 -c 'import re,sys; v=sys.argv[1]; sys.exit(0 if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) and tuple(map(int,v.split("."))) >= (2,0,4) else "Unsafe template version: "+v+"; minimum is 2.0.4")' "$VERSION"
 
 changed=0
 
@@ -186,6 +185,15 @@ PY_SEED
       stage=
     fi
   done < "$SCAFFOLD/seed-manifest-v2.txt"
+fi
+
+# Workflow changes need separate review and permissions. Never copy them during
+# automatic sync; report drift so the operator can install a reviewed update.
+if ! cmp -s "$SCAFFOLD/template-sync.yml" "$REPO_ROOT/.github/workflows/template-sync.yml"; then
+  echo "Workflow update available: review and update .github/workflows/template-sync.yml separately." >&2
+  echo "SYNC-WORKFLOW-DRIFT=1"
+else
+  echo "SYNC-WORKFLOW-DRIFT=0"
 fi
 
 if [ $changed = 1 ] && [ -f "$REPO_ROOT/records/REPO.md" ]; then

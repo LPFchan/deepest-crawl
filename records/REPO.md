@@ -259,28 +259,32 @@ Adopted repos keep the baseline and extend it for their tooling, build artifacts
 
 ## Template Sync Ownership
 
-The updater installed here comes from repo-template 2.0.2
-(commit `8af3fc0c3912de9a39d8287328c8dbd71a92e150`). The policy body in
-this file retains this repo's adopted 1.1.3 baseline and local additions.
-The `Template version` line records the last adopted or synchronized scaffold
-version; installing the updater alone does not advance it. A successful sync
-that changes managed files advances that line without replacing this policy body.
+The updater and separately reviewed workflow installed here use repo-template
+2.0.4. The policy body in this file retains this repo's adopted 1.1.3
+baseline and local additions. The `Template version` line records the last
+adopted or synchronized managed-content version; installing the updater alone
+does not advance it. A successful sync that changes managed files advances that
+line without replacing this policy body. Workflow upgrades are reviewed separately.
 
 - Run `bash scripts/sync-from-template.sh` from a clean checkout, then review and
   commit the resulting managed-file diff. Bash, Git, Python 3, and rsync are required.
-- `.github/workflows/template-sync.yml` runs the same updater each Monday at
-  07:00 KST (Sunday 22:00 UTC), using GitHub Actions' repository `contents: write`
-  token to commit changes. It does not deploy the application.
-- The current upstream `scaffold/manifest.txt` defines managed content: the
-  AGENTS managed section, CLAUDE shim, template skills, hooks, commit/sync scripts,
-  workflow, and upstream-intake guidance/templates. Treat those paths as managed.
-- The AGENTS tail, project truth docs, research, decisions, upstream reports, and
-  existing upstream registers are project-owned. Missing registers are seeded
-  once via `scaffold/seed-manifest-v2.txt`; existing content is preserved.
+- The updater rejects template versions older than 2.0.4 before applying changes.
+- `.github/workflows/template-sync.yml` runs each Monday at 07:00 KST
+  (Sunday 22:00 UTC), using GitHub Actions' repository `contents: write` token
+  to commit permitted content changes through the registered provenance helper
+  and hooks. It does not deploy the application.
+- The upstream `scaffold/manifest.txt` defines managed content: the AGENTS
+  managed section, CLAUDE shim, explicit template skill files, hooks, commit/sync
+  scripts, and upstream-intake guidance/templates. Treat those paths as managed.
+- Workflow files are separate adoption artifacts. Automatic sync preserves the
+  installed workflow and reports upstream drift in the run summary; review and
+  update `.github/workflows/template-sync.yml` through a separate change when needed.
+  The standard Actions token does not require additional credentials or access.
+- The AGENTS tail, project truth docs, research, decisions, upstream reports,
+  existing registers, custom skills/assets, and generated host extractors are
+  project-owned. Missing registers are seeded once via `scaffold/seed-manifest-v2.txt`.
 - Review future ownership changes in the upstream manifest before putting
   project-specific files inside a managed directory.
 
-This repo requires the repo-template 2.0.3 or newer ownership manifest: it
-updates explicit template skill files while preserving generated host extractors
-and custom skill files. Project-specific skill guidance also lives in the
-protected AGENTS tail. Keep the existing `Local Divergence` rules above.
+Project-specific extractor-cache guidance also lives in the protected AGENTS
+tail. Keep the existing `Local Divergence` rules above.
