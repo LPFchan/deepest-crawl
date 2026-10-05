@@ -12,8 +12,7 @@
 #------------------------------------------------------------------------------
 #------------------------------------------------------------------------------
 #------------------------------------------------------------------------------
-#------------------------------------------------------------------------------
-#-------------------------------------------------------------------------
+#--------------------------------
 # Preserve the v2.0.x managed-loop byte boundary.
 
 set -eu
@@ -30,7 +29,7 @@ SCAFFOLD="$TMP/template/scaffold"
 MANIFEST="$SCAFFOLD/manifest.txt"
 VERSION=$(sed -n 's/^\*\*Template version: \(.*\)\*\*/\1/p' "$SCAFFOLD/records/REPO.md" | head -1)
 [ -n "$VERSION" ] || { echo "could not read Template version" >&2; exit 1; }
-python3 -c 'import re,sys; v=sys.argv[1]; sys.exit(0 if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) and tuple(map(int,v.split("."))) >= (2,0,6) else "Unsafe template version: "+v+"; minimum is 2.0.6")' "$VERSION"
+python3 -c 'import re,sys; v=sys.argv[1]; sys.exit(0 if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) and tuple(map(int,v.split("."))) >= (2,0,7) else "Unsafe template version: "+v+"; minimum is 2.0.7")' "$VERSION"
 
 # Validate destinations, protect local changes, and render policy before writes.
 python3 "$SCAFFOLD/sync-preflight.py" "$REPO_ROOT" "$SCAFFOLD" "$TMP" "$VERSION"
@@ -53,18 +52,18 @@ while IFS= read -r line; do
   case "$src" in
     */)
       mkdir -p "$dst_path"
-      if ! diff -qr "$src_path" "$dst_path" >/dev/null 2>&1; then
+      if ! diff -qr "$src_path" "$dst_path" >/dev/null 2>&1 || grep -Fxq -- "$dst" "$TMP/mode-changes"; then
         rsync -a --delete "$src_path" "$dst_path"
         changed=1
       fi
       ;;
     *)
-      if ! cmp -s "$src_path" "$dst_path" 2>/dev/null; then
+      if ! cmp -s "$src_path" "$dst_path" 2>/dev/null || grep -Fxq -- "$dst" "$TMP/mode-changes"; then
         mkdir -p "$(dirname "$dst_path")"
         stage=$(mktemp "$dst_path.template-sync.XXXXXX")
         cp -p "$src_path" "$stage"
+        case "$src" in *.sh) chmod a+x "$stage" ;; *.md) chmod a-x "$stage" ;; esac
         mv -f "$stage" "$dst_path"
-        chmod +x "$dst_path" 2>/dev/null || true
         changed=1
       fi
       ;;
@@ -76,31 +75,14 @@ done < "$MANIFEST"
 # atomically and fail on any error rather than advancing the recorded version.
 if [ ! -f "$TMP/preflight-ready" ]; then
   python3 "$SCAFFOLD/sync-preflight.py" "$REPO_ROOT" "$SCAFFOLD" "$TMP" "$VERSION" --render-only
+  modes_changed=$(python3 "$SCAFFOLD/sync-preflight.py" "$REPO_ROOT" "$SCAFFOLD" "$TMP" "$VERSION" --repair-modes)
+  [ "$modes_changed" = 0 ] || changed=1
 fi
 
 # Each managed file is staged beside its destination before rename, so updates
 # replace the running script inode even when /tmp is on a different filesystem.
 # The header padding keeps the managed-loop byte boundary compatible with the
 # v2.0.x readers, whose first upgrade may still copy in place.
-#
-# The legacy file branch makes every copied file executable. Correct managed
-# Markdown modes after that loop, including on the first legacy-script upgrade.
-# Project-owned seeds and reports are outside this manifest and keep their modes.
-while IFS= read -r line; do
-  case "$line" in ''|\#*) continue ;; esac
-  entry=$(echo "$line" | sed 's/^ *//; s/ *$//')
-  case "$entry" in ''|\#*) continue ;; esac
-  src=${entry%% -> *}
-  dst=${entry##* -> }
-  case "$src" in
-    *.md)
-      if [ -x "$REPO_ROOT/$dst" ]; then
-        chmod a-x "$REPO_ROOT/$dst"
-        changed=1
-      fi
-      ;;
-  esac
-done < "$MANIFEST"
 
 # Install this cleanup in the tail as well: a legacy consumer reaches this
 # code after its first self-update without having run the new script header.
