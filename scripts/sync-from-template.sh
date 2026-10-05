@@ -1,5 +1,6 @@
 #!/bin/bash
-#---------------------------------
+#------------------------------------------------------------------------------
+#----------------
 # Preserve the v2.0.x managed-loop byte boundary.
 
 set -eu
@@ -18,7 +19,69 @@ VERSION=$(sed -n 's/^\*\*Template version: \(.*\)\*\*/\1/p' "$SCAFFOLD/records/R
 [ -n "$VERSION" ] || { echo "could not read Template version" >&2; exit 1; }
 python3 -c 'import re,sys; v=sys.argv[1]; sys.exit(0 if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) and tuple(map(int,v.split("."))) >= (2,0,4) else "Unsafe template version: "+v+"; minimum is 2.0.4")' "$VERSION"
 
+# Validate every destination before publishing any managed files or seeds.
+python3 - "$REPO_ROOT" "$MANIFEST" "$SCAFFOLD/seed-manifest-v2.txt" <<'PY_MANIFEST'
+import os
+import sys
+
+root = os.path.abspath(sys.argv[1])
+workflow = root + '/.github/workflows'
+for manifest in sys.argv[2:]:
+    if not os.path.isfile(manifest):
+        continue
+    for line in open(manifest):
+        entry = line.rstrip('\n').strip(' ')
+        if not entry or entry.startswith('#'):
+            continue
+        if entry == 'AGENTS.md managed-section' and manifest == sys.argv[2]:
+            continue
+        if ' -> ' not in entry:
+            sys.exit('Refusing invalid manifest entry: ' + entry)
+        destination = entry.rsplit(' -> ', 1)[1]
+        target = os.path.abspath(root + '/' + destination)
+        if os.path.isabs(destination) or os.path.commonpath((root, target)) != root:
+            sys.exit('Refusing destination outside the repository: ' + destination)
+        for normalize in (os.path.abspath, os.path.realpath):
+            dst, protected = normalize(target), normalize(workflow)
+            if os.path.commonpath((dst, protected)) in (dst, protected):
+                sys.exit('Refusing workflow destination or ancestor: ' + destination)
+PY_MANIFEST
+
 changed=0
+
+
+while IFS= read -r line; do
+  case "$line" in ''|\#*) continue ;; esac
+  entry=$(echo "$line" | sed 's/^ *//; s/ *$//')
+  case "$entry" in ''|\#*) continue ;; esac
+
+  [ "$entry" != "AGENTS.md managed-section" ] || continue
+
+  src=${entry%% -> *}
+  dst=${entry##* -> }
+  src_path="$SCAFFOLD/$src"
+  dst_path="$REPO_ROOT/$dst"
+
+  case "$src" in
+    */)
+      mkdir -p "$dst_path"
+      if ! diff -qr "$src_path" "$dst_path" >/dev/null 2>&1; then
+        rsync -a --delete "$src_path" "$dst_path"
+        changed=1
+      fi
+      ;;
+    *)
+      if ! cmp -s "$src_path" "$dst_path" 2>/dev/null; then
+        mkdir -p "$(dirname "$dst_path")"
+        stage=$(mktemp "$dst_path.template-sync.XXXXXX")
+        cp -p "$src_path" "$stage"
+        mv -f "$stage" "$dst_path"
+        chmod +x "$dst_path" 2>/dev/null || true
+        changed=1
+      fi
+      ;;
+  esac
+done < "$MANIFEST"
 
 splice_agents() {
   python3 - "$SCAFFOLD/AGENTS.md" "$REPO_ROOT/AGENTS.md" "$TMP/agents-merged.md" <<'PY'
@@ -53,50 +116,6 @@ shutil.copymode(repo_path, out_path)
 PY
 }
 
-while IFS= read -r line; do
-  case "$line" in ''|\#*) continue ;; esac
-  entry=$(echo "$line" | sed 's/^ *//; s/ *$//')
-
-  if [ "$entry" = "AGENTS.md managed-section" ]; then
-    [ -f "$REPO_ROOT/AGENTS.md" ] || continue
-    if splice_agents; then
-      if ! cmp -s "$TMP/agents-merged.md" "$REPO_ROOT/AGENTS.md"; then
-        stage=$(mktemp "$REPO_ROOT/AGENTS.md.template-sync.XXXXXX")
-        cp -p "$TMP/agents-merged.md" "$stage"
-        mv -f "$stage" "$REPO_ROOT/AGENTS.md"
-        changed=1
-      fi
-    else
-      echo "AGENTS.md has no template boundary; skipping managed-section sync" >&2
-    fi
-    continue
-  fi
-
-  src=${entry%% -> *}
-  dst=${entry##* -> }
-  src_path="$SCAFFOLD/$src"
-  dst_path="$REPO_ROOT/$dst"
-
-  case "$src" in
-    */)
-      mkdir -p "$dst_path"
-      if ! diff -qr "$src_path" "$dst_path" >/dev/null 2>&1; then
-        rsync -a --delete "$src_path" "$dst_path"
-        changed=1
-      fi
-      ;;
-    *)
-      if ! cmp -s "$src_path" "$dst_path" 2>/dev/null; then
-        mkdir -p "$(dirname "$dst_path")"
-        stage=$(mktemp "$dst_path.template-sync.XXXXXX")
-        cp -p "$src_path" "$stage"
-        mv -f "$stage" "$dst_path"
-        chmod +x "$dst_path" 2>/dev/null || true
-        changed=1
-      fi
-      ;;
-  esac
-done < "$MANIFEST"
 
 # Each managed file is staged beside its destination before rename, so updates
 # replace the running script inode even when /tmp is on a different filesystem.
@@ -109,6 +128,7 @@ done < "$MANIFEST"
 while IFS= read -r line; do
   case "$line" in ''|\#*) continue ;; esac
   entry=$(echo "$line" | sed 's/^ *//; s/ *$//')
+  case "$entry" in ''|\#*) continue ;; esac
   src=${entry%% -> *}
   dst=${entry##* -> }
   case "$src" in
@@ -148,6 +168,7 @@ if [ -f "$SCAFFOLD/seed-manifest-v2.txt" ]; then
   while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
     entry=$(echo "$line" | sed 's/^ *//; s/ *$//')
+    case "$entry" in ''|\#*) continue ;; esac
     src=${entry%% -> *}
     dst=${entry##* -> }
     dst_path="$REPO_ROOT/$dst"
@@ -196,9 +217,25 @@ else
   echo "SYNC-WORKFLOW-DRIFT=0"
 fi
 
-if [ $changed = 1 ] && [ -f "$REPO_ROOT/records/REPO.md" ]; then
-  if ! grep -q "Template version: $VERSION" "$REPO_ROOT/records/REPO.md"; then
-    sed -i "s/\*\*Template version: [0-9.]*\*\*/**Template version: $VERSION**/" "$REPO_ROOT/records/REPO.md"
+if [ -f "$REPO_ROOT/records/REPO.md" ]; then
+  if ! grep -Fxq "**Template version: $VERSION**" "$REPO_ROOT/records/REPO.md"; then
+    python3 - "$REPO_ROOT/records/REPO.md" "$VERSION" > "$TMP/repo-version.md" <<'PY_VERSION'
+from pathlib import Path
+import re
+import sys
+
+source = Path(sys.argv[1]).read_bytes()
+updated = re.sub(rb'(?m)^\*\*Template version: [0-9.]+\*\*(?=\r?$)',
+                 f'**Template version: {sys.argv[2]}**'.encode(), source)
+sys.stdout.buffer.write(updated)
+PY_VERSION
+    if ! cmp -s "$TMP/repo-version.md" "$REPO_ROOT/records/REPO.md"; then
+      stage=$(mktemp "$REPO_ROOT/records/REPO.md.template-sync.XXXXXX")
+      cp -p "$REPO_ROOT/records/REPO.md" "$stage"
+      cat "$TMP/repo-version.md" > "$stage"
+      mv -f "$stage" "$REPO_ROOT/records/REPO.md"
+      changed=1
+    fi
   fi
 fi
 

@@ -260,11 +260,12 @@ Adopted repos keep the baseline and extend it for their tooling, build artifacts
 ## Template Sync Ownership
 
 The updater and separately reviewed workflow installed here use repo-template
-2.0.4. The policy body in this file retains this repo's adopted 1.1.3
+2.0.5. The policy body in this file retains this repo's adopted 1.1.3
 baseline and local additions. The `Template version` line records the last
 adopted or synchronized managed-content version; installing the updater alone
-does not advance it. A successful sync that changes managed files advances that
-line without replacing this policy body. Workflow upgrades are reviewed separately.
+does not advance it. A successful sync advances that line even when the version
+marker is the only change, without replacing this policy body. Workflow upgrades
+are reviewed separately.
 
 - Run `bash scripts/sync-from-template.sh` from a clean checkout, then review and
   commit the resulting managed-file diff. Bash, Git, Python 3, and rsync are required.
