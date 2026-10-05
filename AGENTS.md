@@ -1,10 +1,7 @@
+<!-- template-managed:begin -->
 # Agent Instructions
 
 `AGENTS.md` is the canonical editable agent-instructions file. It enforces repo behavior while deferring canonical policy to `records/REPO.md`.
-
-Local operators may keep private machine-specific instructions outside this
-repository. Do not commit local shell wrappers, credentials, tokens, or personal
-paths into this file.
 
 ## Read First
 
@@ -47,3 +44,18 @@ Load the skill before the trigger condition fires. Each skill defines the proced
 - Do not turn an inbox review into a digest of every low-confidence idea. Report counts or clusters.
 - Do not write chatty transcripts where the repo expects normalized records.
 - Do not bypass commit provenance checks unless the commit is an explicit bootstrap or migration exception.
+<!-- template-managed:end -->
+
+## Repo-Specific Rules
+
+The managed section above is updated by `scripts/sync-from-template.sh`.
+Keep repo-specific instructions below the end marker; sync preserves this tail.
+
+Local operators may keep private machine-specific instructions outside this
+repository. Do not commit local shell wrappers, credentials, tokens, or personal
+paths into this file.
+
+Project-specific note: deepest-crawl also stores validated generated crawl
+extractors under `skills/<host>/extract.py`. Those host directories are runtime
+extractor cache entries, not repo-template workflow skills unless they contain a
+`SKILL.md`.

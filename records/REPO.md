@@ -255,3 +255,32 @@ Adopted repos keep the baseline and extend it for their tooling, build artifacts
 - The root `skills/` directory has two intentional roles in this project:
   repo-template procedural workflows under named skill directories, and
   deepest-crawl generated per-site extractors under `skills/<host>/extract.py`.
+
+
+## Template Sync Ownership
+
+The updater installed here comes from repo-template 2.0.2
+(commit `8af3fc0c3912de9a39d8287328c8dbd71a92e150`). The policy body in
+this file retains this repo's adopted 1.1.3 baseline and local additions.
+The `Template version` line records the last adopted or synchronized scaffold
+version; installing the updater alone does not advance it. A successful sync
+that changes managed files advances that line without replacing this policy body.
+
+- Run `bash scripts/sync-from-template.sh` from a clean checkout, then review and
+  commit the resulting managed-file diff. Bash, Git, Python 3, and rsync are required.
+- `.github/workflows/template-sync.yml` runs the same updater each Monday at
+  07:00 KST (Sunday 22:00 UTC), using GitHub Actions' repository `contents: write`
+  token to commit changes. It does not deploy the application.
+- The current upstream `scaffold/manifest.txt` defines managed content: the
+  AGENTS managed section, CLAUDE shim, template skills, hooks, commit/sync scripts,
+  workflow, and upstream-intake guidance/templates. Treat those paths as managed.
+- The AGENTS tail, project truth docs, research, decisions, upstream reports, and
+  existing upstream registers are project-owned. Missing registers are seeded
+  once via `scaffold/seed-manifest-v2.txt`; existing content is preserved.
+- Review future ownership changes in the upstream manifest before putting
+  project-specific files inside a managed directory.
+
+This repo requires the repo-template 2.0.3 or newer ownership manifest: it
+updates explicit template skill files while preserving generated host extractors
+and custom skill files. Project-specific skill guidance also lives in the
+protected AGENTS tail. Keep the existing `Local Divergence` rules above.
