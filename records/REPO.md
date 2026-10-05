@@ -260,7 +260,7 @@ Adopted repos keep the baseline and extend it for their tooling, build artifacts
 ## Template Sync Ownership
 
 The updater and separately reviewed workflow installed here use repo-template
-2.0.5. The policy body in this file retains this repo's adopted 1.1.3
+2.0.6. The policy body in this file retains this repo's adopted 1.1.3
 baseline and local additions. The `Template version` line records the last
 adopted or synchronized managed-content version; installing the updater alone
 does not advance it. A successful sync advances that line even when the version
@@ -269,11 +269,16 @@ are reviewed separately.
 
 - Run `bash scripts/sync-from-template.sh` from a clean checkout, then review and
   commit the resulting managed-file diff. Bash, Git, Python 3, and rsync are required.
-- The updater rejects template versions older than 2.0.4 before applying changes.
+- The updater rejects template versions older than 2.0.6 before applying changes.
+  It loads the required preflight helper from that version-checked source and
+  installs the managed helper locally during the first sync.
 - `.github/workflows/template-sync.yml` runs each Monday at 07:00 KST
   (Sunday 22:00 UTC), using GitHub Actions' repository `contents: write` token
   to commit permitted content changes through the registered provenance helper
   and hooks. It does not deploy the application.
+- Before writing, sync validates the AGENTS boundary and refuses uncommitted
+  changes at destinations it would overwrite. Unrelated project data is preserved.
+- Sync commits use the canonical project ID from `records/SPEC.md`.
 - The upstream `scaffold/manifest.txt` defines managed content: the AGENTS
   managed section, CLAUDE shim, explicit template skill files, hooks, commit/sync
   scripts, and upstream-intake guidance/templates. Treat those paths as managed.
