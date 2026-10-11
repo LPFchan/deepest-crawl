@@ -7,11 +7,6 @@ Agents should read the relevant workflow even when their runtime does not auto-l
 
 Each reusable workflow should live at `skills/<name>/SKILL.md`.
 
-Project-specific note: deepest-crawl also stores validated generated crawl
-extractors under `skills/<host>/extract.py`. Those host directories are runtime
-extractor cache entries, not repo-template workflow skills unless they contain a
-`SKILL.md`.
-
 Required baseline skills:
 
 - `repo-orchestrator/`
@@ -21,20 +16,18 @@ Required baseline skills:
 - `commit-generator/`
   - Commit scaffold workflow for repo-compliant `LOG-*` commits.
   - Use it when an agent needs to create a normal commit message without guessing the required structure or provenance fields.
-- `clean-correction-gate/`
-  - Confirmation workflow for destructive edits so replacements stay explicit and durable artifacts stay free of correction-history bleed.
+- `clean-correction/`
+  - Writing rule for destructive edits: write only the intended replacement, keep durable artifacts free of correction-history bleed.
 
 Conditional skills:
 
 - `upstream-intake/`
   - Companion workflow for the optional upstream-review module.
   - Include it when the adopted repo enables `records/upstream-intake/`; omit it when the repo does not track an upstream.
-- `sharpen-the-tip/`
-  - Iterative artifact refinement via neutral-subagent review loop.
-  - Include it when the repo uses structured review cycles for plans, specs, or other artifacts.
-- `prototype-mode/`
-  - Pre-MVP posture: break interfaces freely, skip bridge layers and migration scaffolding, refactor surgically.
-  - Include it when the repo contains greenfield or pre-production code.
+
+## Global skills (not vendored here)
+
+Repo-agnostic workflows — `sharpen-the-tip`, `prototype-mode`, `housekeeping`, `proactive-docs` — are **not** copied into each repo. They live globally in `~/.agents/skills/` (installed by the `agents` module of LPFchan/setup) and the runtime surfaces them everywhere. This scaffold only carries skills that are bound to repo-template's own records/commit machinery.
 
 Keep skills procedural.
 Do not duplicate the canonical rules from `records/REPO.md` inside them.

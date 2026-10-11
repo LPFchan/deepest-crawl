@@ -1,6 +1,6 @@
 # Upstream Intake
 
-This directory is the optional but recommended upstream-review module inside the scaffold.
+This directory is a purely optional upstream-review module inside the scaffold. It is opt-in: enable it only when a repo tracks an upstream. Omit the directory entirely otherwise — nothing in the baseline scaffold depends on it.
 
 Use it when a repo:
 
@@ -26,6 +26,21 @@ The system treats upstream review as a decision workflow, not a changelog summar
    - Standing decisions to carry into later reviews.
 7. `reports/`
    - Storage guidance for internal records and operator briefs.
+
+## Template Sync Ownership
+
+The template manages this directory's README files, `intake-method.md`, and the
+two report templates. Sync updates those guides by exact path.
+
+The project owns completed reports, any additional files, and these registers:
+
+- `compatibility-watchlist.md`
+- `known-local-overrides.md`
+- `decision-carry-forward.md`
+
+Sync copies a register's seed only when its destination is missing. Existing
+registers and reports survive every sync. Apply future register-shape guidance
+manually when useful, preserving the project's entries.
 
 ## Working Model
 

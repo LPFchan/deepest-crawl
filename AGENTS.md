@@ -21,12 +21,12 @@ Load the skill before the trigger condition fires. Each skill defines the proced
 | Trigger | Skill |
 | --- | --- |
 | Before creating a normal commit | `skills/commit-generator/SKILL.md` |
-| Before any destructive file edit (replace, delete, rewrite) | `skills/clean-correction-gate/SKILL.md` |
+| Before replacing, deleting, or rewriting content that already exists | `skills/clean-correction/SKILL.md` |
 | When routing work or creating repo artifacts | `skills/repo-orchestrator/SKILL.md` |
 | When reviewing inbox pressure | `skills/daily-inbox-pressure-review/SKILL.md` |
-| When reviewing upstream changes | `skills/upstream-intake/SKILL.md` |
-| When sharpening or iteratively refining an artifact | `skills/sharpen-the-tip/SKILL.md` |
-| When prototyping, greenfield building, or working pre-MVP | `skills/prototype-mode/SKILL.md` |
+| When reviewing upstream changes *(only if the optional `records/upstream-intake/` module is enabled)* | `skills/upstream-intake/SKILL.md` |
+
+Repo-agnostic skills (`sharpen-the-tip`, `prototype-mode`, `housekeeping`, `proactive-docs`) are **global**, not vendored per repo — they live in `~/.agents/skills/` via the `agents` module of LPFchan/setup, and your runtime surfaces them automatically.
 
 ## Rules
 
@@ -44,6 +44,11 @@ Load the skill before the trigger condition fires. Each skill defines the proced
 - Do not turn an inbox review into a digest of every low-confidence idea. Report counts or clusters.
 - Do not write chatty transcripts where the repo expects normalized records.
 - Do not bypass commit provenance checks unless the commit is an explicit bootstrap or migration exception.
+
+## Code Review Rules
+
+- Before reporting a commit as missing required provenance fields, verify against the exact commit messages as they exist on GitHub. If the fields are present, do not claim they are missing.
+- The provenance contract is defined in `records/REPO.md` and enforced by `scripts/new-commit-message.sh`. Cite the specific field that is missing and the rule it violates; do not review commits against an assumed format.
 <!-- template-managed:end -->
 
 ## Repo-Specific Rules
